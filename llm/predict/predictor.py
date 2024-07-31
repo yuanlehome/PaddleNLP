@@ -48,7 +48,7 @@ from paddlenlp.trainer import PdArgumentParser
 from paddlenlp.transformers import (
     AutoConfig,
     AutoModelForCausalLM,
-    AutoTokenizer,
+    # AutoTokenizer,
     ChatGLMTokenizer,
     ChatGLMv2Tokenizer,
     Llama3Tokenizer,
@@ -58,6 +58,8 @@ from paddlenlp.transformers import (
 )
 from paddlenlp.utils.import_utils import import_module, is_paddlenlp_ops_available
 from paddlenlp.utils.log import logger
+
+from transformers import AutoTokenizer
 
 # Note(@RochardWooSJTU): MAX_BSZ must be the same as definition in get_output / save_output
 MAX_BSZ = 512
@@ -1189,6 +1191,7 @@ class StaticBlockInferencePredictor(BlockInferencePredictorMixin, BasePredictor)
         s_time = time.time()
         self._preprocess(input_texts)
         real_bsz = len(input_texts)
+        # import pdb; pdb.set_trace()
 
         import copy
 
@@ -1631,29 +1634,38 @@ def predict():
                     target_texts.append("")
 
     else:
-        source_texts = ["你好，请问你是谁?"] * predictor_args.batch_size
+        source_texts = ["SYSTEM: You are Hina, a teenage werewolf from an urban fantasy manga. Your family is part of a hidden society of supernatural beings at odds with humans. As tensions rise between the two worlds, you are torn between your loyalty to your family and your desire to bridge the gap between the communities.</s>\nUSER: Hina, how do you plan to bring peace between the supernatural beings and humans?</s>\nMODEL:"] * predictor_args.batch_size
         target_texts = [""] * predictor_args.batch_size
 
     batch_source_texts = batchfy_text(source_texts, predictor_args.batch_size)
     batch_target_texts = batchfy_text(target_texts, predictor_args.batch_size)
-
+    
     with open(model_args.output_file, "w", encoding="utf-8") as f:
         for bs, batch_source_text in enumerate(batch_source_texts):
             logger.info("Start predict")
             outputs = predictor.predict(batch_source_text)
+            paddle.device.synchronize()
+            import time
+            start = time.perf_counter()
+            for _ in range(10):
+                # import pdb; pdb.set_trace()
+                outputs = predictor.predict(batch_source_text)
+            paddle.device.synchronize()
+            end = time.perf_counter()
+            print("avg time is : ", (end - start) / 10)
             logger.info("End predict")
 
-            if predictor.tensor_parallel_rank > 0:
-                continue
-            for output, source, target in zip(outputs, batch_source_texts[bs], batch_target_texts[bs]):
-                print("***********Source**********")
-                print(source)
-                print("***********Target**********")
-                print(target)
-                print("***********Output**********")
-                print(output)
-                out = {"src": source, "tgt": target, "output": output}
-                f.write(json.dumps(out, ensure_ascii=False) + "\n")
+            # if predictor.tensor_parallel_rank > 0:
+            #     continue
+            # for output, source, target in zip(outputs, batch_source_texts[bs], batch_target_texts[bs]):
+            #     print("***********Source**********")
+            #     print(source)
+            #     print("***********Target**********")
+            #     print(target)
+            #     print("***********Output**********")
+            #     print(output)
+            #     out = {"src": source, "tgt": target, "output": output}
+            #     f.write(json.dumps(out, ensure_ascii=False) + "\n")
 
     if predictor_args.benchmark:
         benchmark(predictor, predictor_args, model_args)
@@ -1661,14 +1673,14 @@ def predict():
 
 def benchmark(predictor, predictor_args, model_args):
     # Just construct a simple benchmark input. We pad input to the src_length.
-    test_texts = "hello world, how are you?"
-    benchmark_texts = [test_texts + "<pad>" * predictor_args.src_length for _ in range(predictor_args.batch_size)]
+    test_texts = "SYSTEM: You are Hina, a teenage werewolf from an urban fantasy manga. Your family is part of a hidden society of supernatural beings at odds with humans. As tensions rise between the two worlds, you are torn between your loyalty to your family and your desire to bridge the gap between the communities.</s>\nUSER: Hina, how do you plan to bring peace between the supernatural beings and humans?</s>\nMODEL:"
+    benchmark_texts = [test_texts] * predictor_args.batch_size
 
     batch_benchmark_texts = batchfy_text(benchmark_texts, predictor_args.batch_size)
     print("***********Start Benchmark**********")
 
-    warmup_time = 10
-    test_time = 100
+    warmup_time = 1
+    test_time = 8
 
     print("***********Start Warmup**********")
     for _ in range(warmup_time):
