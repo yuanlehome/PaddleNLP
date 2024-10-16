@@ -2250,6 +2250,8 @@ class FusedBlockMultiTransformer(FusedMultiTransformerBase):
                 "none",  # cache_quant_type
                 self.use_neox_rotary_style,
                 kwargs.get("max_input_length", -1),
+                0.0,
+                0.0,
                 0.0,  # out_linear_in_scale
                 kwargs.get("encoder_block_shape_q", 64),
                 kwargs.get("decoder_block_shape_q", 16),
@@ -2432,6 +2434,8 @@ class FusedBlockMultiTransformerA8W8(FusedBlockMultiTransformer, FusedMultiTrans
                 cache_quant_type_str,
                 self.use_neox_rotary_style,
                 kwargs.get("max_input_length", -1),
+                self.quant_max_bound,
+                self.quant_min_bound,
                 self.act_scales["out_linear_in_scale"][i],
                 kwargs.get("encoder_block_shape_q", 64),
                 kwargs.get("decoder_block_shape_q", 16),
