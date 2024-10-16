@@ -54,6 +54,8 @@ __global__ void multi_query_append_attention_c4_kernel(
     const int max_dec_len,
     const int max_block_num_per_seq,
     const float scale,
+    const float quant_max_bound,
+    const float quant_min_bound,
     const float in_scale,
     const uint32_t chunk_size,
     T *__restrict__ tmp_workspace,  // split kv [token_num, num_chunks,
@@ -185,7 +187,7 @@ __global__ void multi_query_append_attention_c4_kernel(
   __syncthreads();
 #endif
   T *o_base_ptr_T = nullptr;
-  OutT *o_base_ptr_int8 = nullptr;
+  OutT *o_base_ptr_quant = nullptr;
   if constexpr (partition_kv) {
     if (ENABLE_PREFILL) {
       o_base_ptr_T = tmp_workspace + q_start_seq_id * num_chunks * q_n_stride +
@@ -199,7 +201,7 @@ __global__ void multi_query_append_attention_c4_kernel(
           tid % 8 * num_elems_per_128b<T>();
     }
   } else {
-    o_base_ptr_int8 = out + o_offset;
+    o_base_ptr_quant = out + o_offset;
   }
   smem_t qo_smem(smem);
 
@@ -638,6 +640,8 @@ __global__ void multi_query_append_attention_c4_kernel(
         smooth_weight,
         q_base_seq_id_this_block,
         q_head_idx,
+        quant_max_bound,
+        quant_min_bound,
         in_scale,
         q_len,
         partition_kv ? q_n_stride * num_chunks : q_n_stride,
@@ -649,11 +653,13 @@ __global__ void multi_query_append_attention_c4_kernel(
                                         partition_kv>(
         o_frag,
         &qo_smem,
-        o_base_ptr_int8,
+        o_base_ptr_quant,
         shift_bias,
         smooth_weight,
         q_base_seq_id_this_block,
         q_head_idx,
+        quant_max_bound,
+        quant_min_bound,
         in_scale,
         q_len,
         partition_kv ? q_n_stride * num_chunks : q_n_stride,
@@ -726,6 +732,8 @@ __global__ void multi_query_append_attention_c4_warp1_4_kernel(
     const int max_dec_len,
     const int max_block_num_per_seq,
     const float scale,
+    const float quant_max_bound,
+    const float quant_min_bound,
     const float in_scale,
     const uint32_t chunk_size,
     T *__restrict__ tmp_workspace,  // split kv [token_num, num_chunks,
@@ -854,9 +862,9 @@ __global__ void multi_query_append_attention_c4_warp1_4_kernel(
   __syncthreads();
 #endif
   T *o_base_ptr_T = nullptr;
-  OutT *o_base_ptr_int8 = nullptr;
+  OutT *o_base_ptr_quant = nullptr;
   if (num_chunks_this_seq <= 1) {
-    o_base_ptr_int8 = out + o_offset;
+    o_base_ptr_quant = out + o_offset;
   } else {
     if (ENABLE_PREFILL) {
       o_base_ptr_T = tmp_workspace + batch_id * num_chunks * q_n_stride +
@@ -870,7 +878,7 @@ __global__ void multi_query_append_attention_c4_warp1_4_kernel(
           tid % 8 * num_elems_per_128b<T>();
     }
     // } else {
-    //   o_base_ptr_int8 = out + o_offset;
+    //   o_base_ptr_quant = out + o_offset;
   }
 #ifdef DEBUG_ATTN_C4
   if (tid == PRINT_TID && wid == 0 && blockIdx.z == 0) {
@@ -1350,11 +1358,13 @@ __global__ void multi_query_append_attention_c4_warp1_4_kernel(
                                                     false>(
         o_frag,
         &qo_smem,
-        o_base_ptr_int8,
+        o_base_ptr_quant,
         shift_bias,
         smooth_weight,
         q_base_seq_id_this_block,
         q_head_idx,
+        quant_max_bound,
+        quant_min_bound,
         in_scale,
         q_len,
         q_n_stride,
@@ -1371,6 +1381,8 @@ __global__ void multi_query_append_attention_c4_warp1_4_kernel(
         smooth_weight,
         q_base_seq_id_this_block,
         q_head_idx,
+        quant_max_bound,
+        quant_min_bound,
         in_scale,
         q_len,
         q_n_stride * num_chunks,
@@ -1382,7 +1394,7 @@ __global__ void multi_query_append_attention_c4_warp1_4_kernel(
     //                                                   partition_kv>(
     //       o_frag,
     //       &qo_smem,
-    //       o_base_ptr_int8,
+    //       o_base_ptr_quant,
     //       shift_bias,
     //       smooth_weight,
     //       q_base_seq_id_this_block,
@@ -1475,6 +1487,8 @@ void MultiQueryAppendC4Attention(
     const int num_blocks_x_cpu,
     const int max_seq_len,
     const int max_dec_len,
+    const float quant_max_bound,
+    const float quant_min_bound,
     const float in_scale,
     const int max_partition_size,
     const int encoder_max_partition_size,
@@ -1600,6 +1614,8 @@ void MultiQueryAppendC4Attention(
           max_dec_len,
           max_block_num_per_seq,
           scale,
+          quant_max_bound,
+          quant_min_bound,
           in_scale,
           chunk_size,
           nullptr,
@@ -1661,6 +1677,8 @@ void MultiQueryAppendC4Attention(
           max_dec_len,
           max_block_num_per_seq,
           scale,
+          quant_max_bound,
+          quant_min_bound,
           in_scale,
           chunk_size,
           reinterpret_cast<NV_TYPE *>(tmp_workspace->ptr()),
@@ -1696,6 +1714,8 @@ void MultiQueryAppendC4Attention(
                                     smooth_weight.get().data<T>()))
                               : nullptr,
                 reinterpret_cast<OUT_NV_TYPE *>(out->data<OutT>()),
+                quant_max_bound,
+                quant_min_bound,
                 in_scale,
                 max_seq_len,
                 num_chunks,
@@ -1729,6 +1749,8 @@ void MultiQueryAppendC4Attention(
                                     smooth_weight.get().data<T>()))
                               : nullptr,
                 reinterpret_cast<OUT_NV_TYPE *>(out->data<OutT>()),
+                quant_max_bound,
+                quant_min_bound,
                 in_scale,
                 max_seq_len,
                 num_chunks,
@@ -1838,6 +1860,8 @@ void MultiQueryAppendC4Attention(
           max_dec_len,
           max_block_num_per_seq,
           scale,
+          quant_max_bound,
+          quant_min_bound,
           in_scale,
           chunk_size,
           nullptr,
@@ -1912,6 +1936,8 @@ void MultiQueryAppendC4Attention(
           max_dec_len,
           max_block_num_per_seq,
           scale,
+          quant_max_bound,
+          quant_min_bound,
           in_scale,
           chunk_size,
           reinterpret_cast<NV_TYPE *>(tmp_workspace->ptr()),
@@ -1947,6 +1973,8 @@ void MultiQueryAppendC4Attention(
                                     smooth_weight.get().data<T>()))
                               : nullptr,
                 reinterpret_cast<OUT_NV_TYPE *>(out->data<OutT>()),
+                quant_max_bound,
+                quant_min_bound,
                 in_scale,
                 max_seq_len,
                 num_chunks,
@@ -1980,6 +2008,8 @@ void MultiQueryAppendC4Attention(
                                     smooth_weight.get().data<T>()))
                               : nullptr,
                 reinterpret_cast<OUT_NV_TYPE *>(out->data<OutT>()),
+                quant_max_bound,
+                quant_min_bound,
                 in_scale,
                 max_seq_len,
                 num_chunks,
@@ -2026,6 +2056,8 @@ void CascadeAppendAttentionC4Kernel(
     const int block_shape_q,
     const int max_seq_len,
     const int max_dec_len,
+    const float quant_max_bound,
+    const float quant_min_bound,
     const float in_scale,
     const int max_partition_size,
     const int encoder_max_partition_size,
@@ -2090,6 +2122,8 @@ void CascadeAppendAttentionC4Kernel(
                                 num_blocks,
                                 max_seq_len,
                                 max_dec_len,
+                                quant_max_bound,
+                                quant_min_bound,
                                 in_scale,
                                 max_partition_size,
                                 encoder_max_partition_size,

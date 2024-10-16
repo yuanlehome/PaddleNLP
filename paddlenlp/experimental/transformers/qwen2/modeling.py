@@ -38,6 +38,7 @@ from paddlenlp.experimental.model_utils import (
 from paddlenlp.experimental.transformers.fused_transformer_layers import (
     FusedAppendMultiTransformer,
     FusedAppendMultiTransformerA8W8,
+    FusedAppendMultiTransformerFP8,
     FusedAppendMultiTransformerWeightOnly,
     FusedBlockMultiTransformer,
     FusedBlockMultiTransformerA8W8,
@@ -339,6 +340,7 @@ class Qwen2InferenceModel(Qwen2PretrainedModel):
                 epsilon=self.rms_norm_eps,
                 norm_type="rmsnorm",
                 use_neox_rotary_style=self.use_neox,
+                cachekv_int8_type=config.cachekv_int8_type,
                 rank_id=config.tensor_parallel_rank,
                 append_attn=config.append_attn,
             )
@@ -1534,8 +1536,8 @@ class Qwen2BlockInferenceModel(Qwen2InferenceModel):
                 self.transformer_block = FusedAppendMultiTransformerWeightOnly(transformer_config)
             elif self.quant_type == "a8w8" or self.quant_type == "a8w8c8":
                 self.transformer_block = FusedAppendMultiTransformerA8W8(transformer_config)
-            # elif "fp8" in self.quant_type:
-            #     self.transformer_block = FusedAppendMultiTransformerFP8(transformer_config)
+            elif "fp8" in self.quant_type:
+                self.transformer_block = FusedAppendMultiTransformerFP8(transformer_config)
             else:
                 self.transformer_block = FusedAppendMultiTransformer(transformer_config)
 
