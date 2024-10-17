@@ -336,6 +336,7 @@ class Qwen2InferenceModel(Qwen2PretrainedModel):
                 epsilon=self.rms_norm_eps,
                 norm_type="rmsnorm",
                 use_neox_rotary_style=self.use_neox,
+                cachekv_int8_type=config.cachekv_int8_type,
                 rank_id=config.tensor_parallel_rank,
                 append_attn=config.append_attn,
             )
