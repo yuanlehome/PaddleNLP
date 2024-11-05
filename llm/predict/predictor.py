@@ -24,12 +24,11 @@ from threading import Thread
 import numpy as np
 import paddle
 import paddle.incubate.multiprocessing as mp
-from env import MAX_BSZ, MAX_DRAFT_TOKENS, SPECULATE_MAX_BSZ
 from paddle.base.framework import in_cinn_mode, in_pir_executor_mode, use_pir_api
 from paddle.distributed import fleet
 from paddlenlp_ops import speculate_update_input_ids_cpu
-from proposers import InferenceWithReferenceProposer
 
+from paddlenlp.experimental.transformers import InferenceWithReferenceProposer
 from paddlenlp.generation import GenerationConfig, TextIteratorStreamer
 from paddlenlp.peft import LoRAConfig, LoRAModel, PrefixConfig, PrefixModelForCausalLM
 from paddlenlp.taskflow.utils import static_mode_guard
@@ -49,6 +48,12 @@ from paddlenlp.transformers import (
 from paddlenlp.trl import llm_utils
 from paddlenlp.utils.import_utils import is_paddlenlp_ops_available
 from paddlenlp.utils.log import logger
+
+# Note(@RochardWooSJTU): MAX_BSZ must be the same as definition in get_output / save_output
+MAX_BSZ = 512
+# Note(@Wanglongzhi2001): SPECULATE_MAX_BSZ must be the same as definition in speculate_get_output / speculate_save_output
+SPECULATE_MAX_BSZ = 256
+MAX_DRAFT_TOKENS = 6
 
 
 @dataclass
@@ -105,7 +110,7 @@ class PredictorArgument:
         default="fp16",
         metadata={"help": "avx cachekv type. Supported values: fp16,int8"},
     )
-    batch_size: int = field(default=1, metadata={"help": "The batch size of data."})
+    batch_size: int = field(default=20, metadata={"help": "The batch size of data."})
     benchmark: bool = field(
         default=False,
         metadata={

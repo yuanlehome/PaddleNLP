@@ -27,7 +27,6 @@ import paddle.incubate.multiprocessing as mp
 from paddle.distributed import fleet
 from sklearn.metrics import accuracy_score
 
-from llm.predict.env import MAX_DRAFT_TOKENS, SPECULATE_MAX_BSZ
 from paddlenlp.datasets import ZeroPaddingIterableDataset
 from paddlenlp.generation import GenerationConfig
 from paddlenlp.trainer import TrainerCallback
@@ -652,6 +651,10 @@ def read_res(model_name_or_path: str, tensor_queue: mp.Queue, result_queue: mp.Q
 
 
 def speculate_read_res(model_name_or_path: str, tensor_queue: mp.Queue, result_queue: mp.Queue, done_event: mp.Event):
+    # Note(@Wanglongzhi2001): SPECULATE_MAX_BSZ must be the same as definition in speculate_get_output / speculate_save_output
+    SPECULATE_MAX_BSZ = 256
+    MAX_DRAFT_TOKENS = 6
+
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
     paddle.device.set_device("cpu")
     paddle.disable_static()
