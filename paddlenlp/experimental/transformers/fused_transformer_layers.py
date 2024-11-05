@@ -69,7 +69,6 @@ if paddle.is_compiled_with_cuda():
             quant_int8,
             rebuild_append_padding,
             rebuild_padding,
-            rebuild_padding_v2,
             transpose_remove_padding,
             write_cache_kv,
         )
