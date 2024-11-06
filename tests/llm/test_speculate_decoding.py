@@ -17,17 +17,18 @@ import os
 import unittest
 
 import paddle
-from testing_utils import LLMTest, argv_context_guard, load_test_config
 
 from paddlenlp.transformers import (  # ChatGLMForCausalLM,
     AutoTokenizer,
     LlamaForCausalLM,
 )
 
+from .testing_utils import LLMTest, argv_context_guard, load_test_config
+
 
 class SpeculatePredictorTest(LLMTest, unittest.TestCase):
     config_path: str = "./tests/fixtures/llm/predictor.yaml"
-    model_name_or_path: str = "/workspace/wanglongzhi/MyPaddleNLP/PaddleNLP/llm/tiny_llama_head_dim128"
+    model_name_or_path: str = "__internal_testing__/tiny-random-llama-hd128"
     model_class = LlamaForCausalLM
 
     def setUp(self) -> None:
