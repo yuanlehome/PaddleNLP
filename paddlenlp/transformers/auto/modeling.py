@@ -832,7 +832,12 @@ class AutoInferenceModelForCausalLM(_BaseAutoModelClass):
                 )
         else:
             # Check whether the model use block attention
-            attn_type = "Block" if predictor_args.block_attn else ""
+            if predictor_args.speculate_method is not None:
+                attn_type = "Speculate"
+            elif predictor_args.block_attn:
+                attn_type = "Block"
+            else:
+                attn_type = ""
             model_name = f"{config.architectures[0]}{attn_type}"
 
         # Import the InferenceModel
