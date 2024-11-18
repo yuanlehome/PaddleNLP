@@ -17,7 +17,7 @@ import subprocess
 
 import paddle
 from paddle.utils.cpp_extension import CUDAExtension, setup
-import subprocess
+
 
 def update_git_submodule():
     try:
@@ -107,6 +107,8 @@ sources = [
     "./gpu/append_attn/decoder_write_cache_with_rope_kernel.cu",
     "./gpu/append_attn/speculate_write_cache_with_rope_kernel.cu",
     "./gpu/sample_kernels/top_p_sampling_reject.cu",
+    "./gpu/update_inputs_v2.cu",
+    "./gpu/set_preids_token_penalty_multi_scores.cu",
     "./gpu/speculate_decoding_kernels/ngram_match.cc",
 ]
 sources += find_end_files("./gpu/append_attn/template_instantiation", ".cu")
