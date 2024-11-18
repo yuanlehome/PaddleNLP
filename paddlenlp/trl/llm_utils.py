@@ -633,7 +633,7 @@ def read_res(model_name_or_path: str, tensor_queue: mp.Queue, result_queue: mp.Q
     from paddlenlp_ops import get_output
 
     while True:
-        get_output(output_tensor, 0, True)
+        get_output(output_tensor, 0, True, False)  # wait_flag  # speculative_decoding
         if int(output_tensor[0, 0]) == -2:  # read none
             continue
         bsz = int(output_tensor[1, 0])
@@ -651,7 +651,7 @@ def read_res(model_name_or_path: str, tensor_queue: mp.Queue, result_queue: mp.Q
 
 
 def speculate_read_res(model_name_or_path: str, tensor_queue: mp.Queue, result_queue: mp.Queue, done_event: mp.Event):
-    # Note(@Wanglongzhi2001): SPECULATE_MAX_BSZ must be the same as definition in speculate_get_output / speculate_save_output
+    # Note(@Wanglongzhi2001): SPECULATE_MAX_BSZ must be the same as definition in get_output / save_output
     SPECULATE_MAX_BSZ = 256
     MAX_DRAFT_TOKENS = 6
 
@@ -666,10 +666,10 @@ def speculate_read_res(model_name_or_path: str, tensor_queue: mp.Queue, result_q
     logger.info("Start speculate read result message")
     logger.info(f"Current path is {os.getcwd()}")
 
-    from paddlenlp_ops import speculate_get_output
+    from paddlenlp_ops import get_output
 
     while True:
-        speculate_get_output(output_tensor, 0, True)
+        get_output(output_tensor, 0, True, True)  # wait_flag  # speculative_decoding
         if int(output_tensor[0, 0]) == -2:  # read none
             continue
         bsz = int(output_tensor[1])

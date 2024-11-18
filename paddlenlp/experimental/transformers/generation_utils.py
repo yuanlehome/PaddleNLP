@@ -718,7 +718,12 @@ class GenerationBlockInferenceModel(GenerationMixin):
             )
             from paddlenlp_ops import save_output
 
-            save_output(next_tokens, model_kwargs["not_need_stop"], self.config.tensor_parallel_rank)
+            save_output(
+                next_tokens,
+                model_kwargs["not_need_stop"],
+                model_kwargs.get("accept_tokens", None),  # only initialized in speculative decoding
+                self.config.tensor_parallel_rank,
+            )
             return next_tokens
 
         # encoder

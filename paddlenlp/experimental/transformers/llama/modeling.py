@@ -24,11 +24,10 @@ from paddle import nn
 from paddle.distributed import fleet
 from paddle.nn.quant import weight_quantize
 from paddlenlp_ops import (
-    speculate_clear_accept_nums,
+    save_output,
     speculate_get_output_padding_offset,
     speculate_get_padding_offset,
     speculate_get_seq_lens_output,
-    speculate_save_output,
     speculate_set_value_by_flags_and_idx,
     speculate_verify_and_update,
     top_p_candidates,
@@ -51,8 +50,6 @@ from paddlenlp.experimental.transformers.fused_transformer_layers import (
     FusedMultiTransformerBase,
     FusedMultiTransformerConfig,
     FusedMultiTransformerWeightOnly,
-    FusedSpeculateMultiTransformer,
-    FusedSpeculateMultiTransformerA8W8,
 )
 from paddlenlp.experimental.transformers.generation_utils import (
     GenerationAvxInferenceModel,
@@ -1454,23 +1451,29 @@ class LlamaBlockInferenceModel(LlamaInferenceModel):
 
 @register_base_model
 class LlamaSpeculateInferenceModel(LlamaBlockInferenceModel):
-    def __init__(self, speculate_max_draft_token_num: int, speculate_method: str = None, config: LlamaConfig = None):
+    def __init__(
+        self, config: LlamaConfig = None, speculate_max_draft_token_num: int = 1, speculate_method: str = None
+    ):
         self.speculate_max_draft_token_num = speculate_max_draft_token_num
         self.speculate_method = speculate_method
         super().__init__(config)
 
     def set_transformer_block(self, transformer_config):
         if self.use_weight_only:
-            self.transformer_block = FusedBlockMultiTransformerWeightOnly(transformer_config)
+            self.transformer_block = FusedBlockMultiTransformerWeightOnly(
+                transformer_config, self.speculate_max_draft_token_num, self.speculate_method
+            )
         elif self.quant_type == "a8w8" or self.quant_type == "a8w8c8":
-            self.transformer_block = FusedSpeculateMultiTransformerA8W8(
-                self.speculate_max_draft_token_num, self.speculate_method, transformer_config
+            self.transformer_block = FusedBlockMultiTransformerA8W8(
+                transformer_config, self.speculate_max_draft_token_num, self.speculate_method
             )
         elif "fp8" in self.quant_type:
-            self.transformer_block = FusedBlockMultiTransformerFP8(transformer_config)
+            self.transformer_block = FusedBlockMultiTransformerFP8(
+                transformer_config, self.speculate_max_draft_token_num, self.speculate_method
+            )
         else:
-            self.transformer_block = FusedSpeculateMultiTransformer(
-                self.speculate_max_draft_token_num, self.speculate_method, transformer_config
+            self.transformer_block = FusedBlockMultiTransformer(
+                transformer_config, self.speculate_max_draft_token_num, self.speculate_method
             )
 
     def remove_padding(self, input_ids, draft_tokens, seq_lens_this_time, seq_lens_encoder):
@@ -2022,7 +2025,7 @@ class LlamaForCausalLMSpeculateInferenceModel(LlamaForCausalLMBlockInferenceMode
         self.verify_window = config.speculate_verify_window
         self.speculate_max_draft_token_num = config.speculate_max_draft_token_num
         self.speculate_method = config.speculate_method
-        self.llama = LlamaSpeculateInferenceModel(self.speculate_max_draft_token_num, self.speculate_method, config)
+        self.llama = LlamaSpeculateInferenceModel(config, self.speculate_max_draft_token_num, self.speculate_method)
         self.lm_head = LlamaLMHead(config)
 
     def prepare_inputs_for_generation(self, **kwargs):
@@ -2156,15 +2159,15 @@ class LlamaForCausalLMSpeculateInferenceModel(LlamaForCausalLMBlockInferenceMode
 
             # Since the output token length is not bsz anymore, we need to change the token_num
             # in the msg queue and write accept_num tokens into the msg queue.
-            speculate_save_output(
+            save_output(
                 model_kwargs["accept_tokens"],
-                model_kwargs["accept_num"],
                 model_kwargs["not_need_stop"],
+                model_kwargs["accept_num"],
                 self.config.tensor_parallel_rank,
             )
 
             # If seq_lens_decoder is 0 (means stop), accept_num should be set to 0
-            speculate_clear_accept_nums(model_kwargs["accept_num"], model_kwargs["seq_lens_decoder"])
+            model_kwargs["accept_num"][model_kwargs["seq_lens_decoder"] == 0] = 0
 
             # Update pre_ids through accept tokens
             speculate_set_value_by_flags_and_idx(

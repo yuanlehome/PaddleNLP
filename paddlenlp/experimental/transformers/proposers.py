@@ -60,14 +60,9 @@ class InferenceWithReferenceProposer(Proposer):
         super().__init__()
         self.max_ngram_size = max_ngram_size
         self.input_ids_len = paddle.zeros(shape=[max_batch_size, 1], dtype="int64").cpu()
+        self.input_ids_cpu = paddle.zeros(shape=[max_batch_size, max_seq_len], dtype="int64").cpu()
         self.max_batch_size = max_batch_size
         self.max_draft_token_num = max_draft_token_num
-
-    def update(self, bid: int, seq_len: int):
-        """
-        Used when inserting a new query to update the length of the input_ids.
-        """
-        self.input_ids_len[bid] = seq_len
 
     def run(self, model_inputs: dict[str, paddle.Tensor], **kargs):
         """
@@ -78,7 +73,7 @@ class InferenceWithReferenceProposer(Proposer):
         seq_lens_encoder = model_inputs["seq_lens_encoder"].cpu()
         seq_lens_decoder = model_inputs["seq_lens_decoder"].cpu()
         ngram_match(
-            model_inputs["input_ids_cpu"],
+            self.input_ids_cpu,
             self.input_ids_len.cpu(),
             model_inputs["pre_ids"].cpu(),
             model_inputs["step_idx"].cpu(),
