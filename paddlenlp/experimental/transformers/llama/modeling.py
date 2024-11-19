@@ -26,7 +26,6 @@ from paddle.nn.quant import weight_quantize
 from paddlenlp_ops import (
     save_output,
     speculate_get_output_padding_offset,
-    speculate_get_padding_offset,
     speculate_get_seq_lens_output,
     speculate_set_value_by_flags_and_idx,
     speculate_verify_and_update,
@@ -50,6 +49,7 @@ from paddlenlp.experimental.transformers.fused_transformer_layers import (
     FusedMultiTransformerBase,
     FusedMultiTransformerConfig,
     FusedMultiTransformerWeightOnly,
+    SpeculateConfig,
 )
 from paddlenlp.experimental.transformers.generation_utils import (
     GenerationAvxInferenceModel,
@@ -619,6 +619,12 @@ class LlamaInferenceModel(LlamaPretrainedModel):
                 paddle.ParamAttr(name="fusellama.{}.cache_v_out_scale".format(i)) for i in range(self.num_layers)
             ]
 
+        speculate_config = SpeculateConfig(
+            speculate_method=config.speculate_method if hasattr(config, "speculate_method") else None,
+            speculate_max_draft_token_num=config.speculate_max_draft_token_num
+            if hasattr(config, "speculate_max_draft_token_num")
+            else 1,
+        )
         transformer_config = FusedMultiTransformerConfig(
             embed_dim=self.hidden_size,
             num_heads=self.num_attention_heads,
@@ -668,6 +674,7 @@ class LlamaInferenceModel(LlamaPretrainedModel):
             rank_id=config.tensor_parallel_rank,
             trans_qkvw=(False if paddle.is_compiled_with_rocm() and "a8w8" in self.quant_type else True),
             append_attn=config.append_attn,
+            speculate_config=speculate_config,
         )
 
         self.set_transformer_block(transformer_config)
@@ -1393,13 +1400,13 @@ class LlamaBlockInferenceModel(LlamaInferenceModel):
         else:
             self.transformer_block = FusedBlockMultiTransformer(transformer_config)
 
-    def remove_padding(self, input_ids, seq_lens_this_time):
+    def remove_padding(self, input_ids, seq_lens_this_time, draft_tokens=None, seq_lens_encoder=None):
         cum_offsets_now = paddle.cumsum(self.max_seq_len - seq_lens_this_time)
         token_num = paddle.sum(seq_lens_this_time)
         from paddlenlp_ops import get_padding_offset_v2
 
         ids_remove_padding, cum_offsets, padding_offset, cu_seqlens_q, cu_seqlens_k = get_padding_offset_v2(
-            input_ids, cum_offsets_now, token_num, seq_lens_this_time
+            input_ids, cum_offsets_now, token_num, seq_lens_this_time, draft_tokens, seq_lens_encoder
         )
         return ids_remove_padding, padding_offset, cum_offsets, cu_seqlens_q, cu_seqlens_k
 
@@ -1451,53 +1458,6 @@ class LlamaBlockInferenceModel(LlamaInferenceModel):
 
 @register_base_model
 class LlamaSpeculateInferenceModel(LlamaBlockInferenceModel):
-    def __init__(
-        self, config: LlamaConfig = None, speculate_max_draft_token_num: int = 1, speculate_method: str = None
-    ):
-        self.speculate_max_draft_token_num = speculate_max_draft_token_num
-        self.speculate_method = speculate_method
-        super().__init__(config)
-
-    def set_transformer_block(self, transformer_config):
-        if self.use_weight_only:
-            self.transformer_block = FusedBlockMultiTransformerWeightOnly(
-                transformer_config, self.speculate_max_draft_token_num, self.speculate_method
-            )
-        elif self.quant_type == "a8w8" or self.quant_type == "a8w8c8":
-            self.transformer_block = FusedBlockMultiTransformerA8W8(
-                transformer_config, self.speculate_max_draft_token_num, self.speculate_method
-            )
-        elif "fp8" in self.quant_type:
-            self.transformer_block = FusedBlockMultiTransformerFP8(
-                transformer_config, self.speculate_max_draft_token_num, self.speculate_method
-            )
-        else:
-            self.transformer_block = FusedBlockMultiTransformer(
-                transformer_config, self.speculate_max_draft_token_num, self.speculate_method
-            )
-
-    def remove_padding(self, input_ids, draft_tokens, seq_lens_this_time, seq_lens_encoder):
-        """
-        The overloading of remove_padding, using the speculate_get_padding_offset operator,
-        differs from the base class in that the decoder is the append scenario. The actual
-        number of draft tokens for each batch in the speculative sampling decoding stage may
-        be different, so we need a remove_padding adapted to the speculative sampling decoder stage.
-
-        Args:
-            input_ids (Tensor): the input sequence IDs tensor.
-            draft_tokens (Tensor): the draft tokens tensor.
-            seq_lens_this_time (Tensor): the sequence lengths of this time step.
-            seq_lens_encoder (Tensor): the sequence lengths of encoder stage.
-        Returns:
-            Tuple[Tensor]: the removed padding IDs, padding offsets, cumulative offsets,
-        """
-        cum_offsets_now = paddle.cumsum(self.max_seq_len - seq_lens_this_time)
-        token_num = paddle.sum(seq_lens_this_time)
-        ids_remove_padding, cum_offsets, padding_offset, cu_seqlens_q, cu_seqlens_k = speculate_get_padding_offset(
-            input_ids, draft_tokens, cum_offsets_now, token_num, seq_lens_this_time, seq_lens_encoder
-        )
-        return ids_remove_padding, padding_offset, cum_offsets, cu_seqlens_q, cu_seqlens_k
-
     def forward(
         self,
         input_ids=None,
@@ -1515,7 +1475,7 @@ class LlamaSpeculateInferenceModel(LlamaBlockInferenceModel):
         seq_lens_encoder = kwargs.get("seq_lens_encoder", None)
         rope_emb = kwargs.get("rope_emb", None)
         ids_remove_padding, padding_offset, cum_offsets, cu_seqlens_q, cu_seqlens_k = self.remove_padding(
-            input_ids, draft_tokens, seq_lens_this_time, seq_lens_encoder
+            input_ids, seq_lens_this_time, draft_tokens, seq_lens_encoder
         )
         kwargs["cu_seqlens_q"] = cu_seqlens_q
         kwargs["cu_seqlens_k"] = cu_seqlens_k
@@ -2023,9 +1983,7 @@ class LlamaForCausalLMSpeculateInferenceModel(LlamaForCausalLMBlockInferenceMode
         self.max_seq_len = config.max_seq_len
         self.max_candidate_len = config.speculate_max_candidate_len
         self.verify_window = config.speculate_verify_window
-        self.speculate_max_draft_token_num = config.speculate_max_draft_token_num
-        self.speculate_method = config.speculate_method
-        self.llama = LlamaSpeculateInferenceModel(config, self.speculate_max_draft_token_num, self.speculate_method)
+        self.llama = LlamaSpeculateInferenceModel(config)
         self.lm_head = LlamaLMHead(config)
 
     def prepare_inputs_for_generation(self, **kwargs):

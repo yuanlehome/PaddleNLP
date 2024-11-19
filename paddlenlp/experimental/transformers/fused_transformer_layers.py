@@ -137,6 +137,12 @@ class AvxConfig:
     cache_dtype: str = "fp16"
 
 
+@dataclass
+class SpeculateConfig:
+    speculate_max_draft_token_num: int = (1,)
+    speculate_method: str = None
+
+
 class FusedMultiTransformerConfig:
     def __init__(
         self,
@@ -201,6 +207,7 @@ class FusedMultiTransformerConfig:
         append_attn=False,
         moe_config=MoeConfig(),
         avx_config=AvxConfig(),
+        speculate_config=SpeculateConfig(),
     ):
         self.embed_dim = embed_dim
         self.num_heads = num_heads
@@ -278,6 +285,7 @@ class FusedMultiTransformerConfig:
 
         self.moe_config = moe_config
         self.avx_config = avx_config
+        self.speculate_config = speculate_config
 
 
 class FusedMultiTransformerBase(Layer):
@@ -1053,7 +1061,7 @@ class FusedMultiTransformerBase(Layer):
                 kwargs.get("decoder_block_shape_q", 16),
                 self.num_heads // self.kv_num_heads,
                 kwargs.get("block_size", 64),
-                self.speculate_max_draft_token_num,
+                self.config.speculate_config.speculate_max_draft_token_num,
             )
 
         residual_input = src
@@ -2124,13 +2132,8 @@ class FusedMultiTransformerA8W8(FusedMultiTransformerBase):
 
 
 class FusedBlockMultiTransformer(FusedMultiTransformerBase):
-    def __init__(
-        self, config: FusedMultiTransformerConfig, speculate_max_draft_token_num: int = 1, speculate_method: str = None
-    ):
+    def __init__(self, config: FusedMultiTransformerConfig):
         super().__init__(config)
-        self.speculate_max_draft_token_num = speculate_max_draft_token_num
-        self.speculate_method = speculate_method
-
         if paddle.is_compiled_with_xpu():
             self.cache_k_per_batch_maxs = paddle.full(shape=[10, 6], fill_value=0, dtype="float32")
             self.cache_v_per_batch_maxs = paddle.full(shape=[10, 6], fill_value=0, dtype="float32")
@@ -2199,9 +2202,9 @@ class FusedBlockMultiTransformer(FusedMultiTransformerBase):
                 kwargs.get("decoder_block_shape_q", 16),
                 kwargs.get("max_partition_size", 32768),
                 kwargs.get("encoder_max_partition_size", 32768),
-                self.speculate_max_draft_token_num,  # speculate_max_draft_token_num
+                self.config.speculate_config.speculate_max_draft_token_num,
                 True,  # causal
-                self.speculate_method is not None,  # speculate_decoder
+                self.config.speculate_config.speculate_method is not None,  # speculate_decoder
             )[0]
         else:
             if paddle.is_compiled_with_xpu():
@@ -2310,21 +2313,13 @@ class FusedBlockMultiTransformer(FusedMultiTransformerBase):
 
 
 class FusedBlockMultiTransformerWeightOnly(FusedBlockMultiTransformer, FusedMultiTransformerWeightOnly):
-    def __init__(
-        self, config: FusedMultiTransformerConfig, speculate_max_draft_token_num: int = 1, speculate_method: str = None
-    ):
+    def __init__(self, config: FusedMultiTransformerConfig):
         super().__init__(config)
-        self.speculate_max_draft_token_num = speculate_max_draft_token_num
-        self.speculate_method = speculate_method
 
 
 class FusedBlockMultiTransformerA8W8(FusedBlockMultiTransformer, FusedMultiTransformerA8W8):
-    def __init__(
-        self, config: FusedMultiTransformerConfig, speculate_max_draft_token_num: int = 1, speculate_method: str = None
-    ):
+    def __init__(self, config: FusedMultiTransformerConfig):
         super().__init__(config)
-        self.speculate_max_draft_token_num = speculate_max_draft_token_num
-        self.speculate_method = speculate_method
 
     def compute_attn(
         self,
@@ -2405,9 +2400,9 @@ class FusedBlockMultiTransformerA8W8(FusedBlockMultiTransformer, FusedMultiTrans
                 kwargs.get("decoder_block_shape_q", 16),
                 kwargs.get("max_partition_size", 32768),
                 kwargs.get("encoder_max_partition_size", 32768),
-                self.speculate_max_draft_token_num,  # speculate_max_draft_token_num
+                self.config.speculate_config.speculate_max_draft_token_num,
                 True,  # causal
-                self.speculate_method is not None,  # speculate_decoder
+                self.config.speculate_config.speculate_method is not None,  # speculate_decoder
             )[0]
         else:
             fmha_out = paddle.incubate.nn.functional.block_multihead_attention(
@@ -2455,13 +2450,8 @@ class FusedBlockMultiTransformerA8W8(FusedBlockMultiTransformer, FusedMultiTrans
 
 
 class FusedBlockMultiTransformerFP8(FusedBlockMultiTransformer):
-    def __init__(
-        self, config: FusedMultiTransformerConfig, speculate_max_draft_token_num: int = 1, speculate_method: str = None
-    ):
+    def __init__(self, config: FusedMultiTransformerConfig):
         super().__init__(config)
-        self.speculate_max_draft_token_num = speculate_max_draft_token_num
-        self.speculate_method = speculate_method
-
         self.act_scales = None
         self.weight_scales = None
 
@@ -2775,7 +2765,7 @@ class FusedBlockMultiTransformerFP8(FusedBlockMultiTransformer):
                 kwargs.get("decoder_block_shape_q", 16),
                 kwargs.get("max_partition_size", 32768),
                 kwargs.get("encoder_max_partition_size", 32768),
-                kwargs["speculate_max_draft_token_num"],  # speculate_max_draft_token_num
+                self.config.speculate_config.speculate_max_draft_token_num,
                 True,  # causal
                 False,  # speculate_decoder
             )[0]

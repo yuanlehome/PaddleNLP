@@ -27,7 +27,7 @@ import paddle.incubate.multiprocessing as mp
 from paddle.base.framework import in_cinn_mode, in_pir_executor_mode, use_pir_api
 from paddle.distributed import fleet
 
-from paddlenlp.experimental.transformers import InferenceWithReferenceProposer
+from paddlenlp.experimental import InferenceWithReferenceProposer
 from paddlenlp.generation import GenerationConfig, TextIteratorStreamer
 from paddlenlp.peft import LoRAConfig, LoRAModel, PrefixConfig, PrefixModelForCausalLM
 from paddlenlp.taskflow.utils import static_mode_guard
@@ -45,13 +45,9 @@ from paddlenlp.transformers import (
     PretrainedTokenizer,
 )
 from paddlenlp.trl import llm_utils
+from paddlenlp.utils.env import MAX_BSZ, MAX_DRAFT_TOKENS, SPECULATE_MAX_BSZ
 from paddlenlp.utils.import_utils import is_paddlenlp_ops_available
 from paddlenlp.utils.log import logger
-
-# Note(@Wanglongzhi2001): MAX_BSZ, SPECULATE_MAX_BSZ, MAX_DRAFT_TOKENS must be the same as definition in get_output / save_output
-MAX_BSZ = 512
-SPECULATE_MAX_BSZ = 256
-MAX_DRAFT_TOKENS = 6
 
 
 @dataclass
@@ -158,6 +154,8 @@ class PredictorArgument:
     speculate_max_candidate_len: int = field(default=5, metadata={"help": "the max length of candidate tokens."})
 
     def __post_init__(self):
+        if self.speculate_method is not None:
+            self.append_attn = True
         if self.append_attn:
             self.block_attn = True
         assert (
@@ -1462,7 +1460,7 @@ def create_predictor(
                 tensor_parallel_rank=tensor_parallel_rank,
             )
             model.eval()
-            if predictor_args.block_attn:
+            if predictor_args.block_attn and predictor_args.speculate_method is None:
                 predictor = DygraphBlockInferencePredictor(predictor_args, model=model, tokenizer=tokenizer)
             elif predictor_args.speculate_method is not None:
                 predictor = DygraphSpeculateInferencePredictor(predictor_args, model=model, tokenizer=tokenizer)

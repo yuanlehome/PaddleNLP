@@ -111,3 +111,9 @@ SAFE_MASTER_WEIGHTS_INDEX_NAME = "master_weights.safetensors.index.json"
 
 SAFE_PEFT_WEIGHTS_NAME = "peft_model.safetensors"
 SAFE_PEFT_WEIGHTS_INDEX_NAME = "peft_model.safetensors.index.json"
+
+# Inference related environment variables
+# Note(@Wanglongzhi2001): MAX_BSZ, SPECULATE_MAX_BSZ, MAX_DRAFT_TOKENS must be the same as definition in get_output / save_output
+MAX_BSZ = 512
+SPECULATE_MAX_BSZ = 256
+MAX_DRAFT_TOKENS = 6

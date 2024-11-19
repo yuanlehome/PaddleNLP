@@ -1157,9 +1157,6 @@ class PretrainedModel(Layer, GenerationMixin, ConversionMixin):
             config.max_seq_len = predictor_args.total_max_length
 
         if predictor_args.speculate_method is not None:
-            config.append_attn = True
-            config.block_size = predictor_args.block_size
-            config.max_seq_len = predictor_args.total_max_length
             config.speculate_method = predictor_args.speculate_method
             config.speculate_max_draft_token_num = predictor_args.speculate_max_draft_token_num
             config.speculate_max_ngram_size = predictor_args.speculate_max_ngram_size

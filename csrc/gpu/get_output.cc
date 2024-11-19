@@ -28,12 +28,19 @@ struct msgdata {
     int mtext[MAX_BSZ + 2];   // stop_flag, bsz, tokens
 };
 
-void GetOutputFunc(const paddle::Tensor& x,
-               int64_t rank_id,
-               bool wait_flag) {
-  if (rank_id > 0) return;
+struct SpeculateMsgData {
+    long mtype;
+    int mtext[SPECULATE_MAX_BSZ * MAX_DRAFT_TOKENS + SPECULATE_MAX_BSZ + 2];   // stop_flag, bsz, tokens
+};
 
-  static struct msgdata msg_rcv;
+static struct msgdata msg_rcv;
+static struct SpeculateMsgData specu_msg_rcv;
+
+void GetOutput(const paddle::Tensor& x,
+               int64_t rank_id,
+               bool wait_flag,
+               bool speculative_decoding) {
+  if (rank_id > 0) return;
 
   static key_t key = ftok("./", 1);
 
@@ -42,9 +49,17 @@ void GetOutputFunc(const paddle::Tensor& x,
   int64_t *out_data = const_cast<int64_t*>(x.data<int64_t>());
   int ret = -1;
   if (!wait_flag) {
-    ret = msgrcv(msgid, &msg_rcv, (MAX_BSZ + 2) * 4, 0, IPC_NOWAIT);
+    if (!speculative_decoding) {
+      ret = msgrcv(msgid, &msg_rcv, (MAX_BSZ + 2) * 4, 0, IPC_NOWAIT);
+    } else {
+      ret = msgrcv(msgid, &specu_msg_rcv, (SPECULATE_MAX_BSZ * MAX_DRAFT_TOKENS + SPECULATE_MAX_BSZ + 2) * 4, 0, IPC_NOWAIT);
+    }
   } else {
-    ret = msgrcv(msgid, &msg_rcv, (MAX_BSZ + 2) * 4, 0, 0);
+    if (!speculative_decoding) {
+      ret = msgrcv(msgid, &msg_rcv, (MAX_BSZ + 2) * 4, 0, 0);
+    } else{
+      ret = msgrcv(msgid, &specu_msg_rcv, (SPECULATE_MAX_BSZ * MAX_DRAFT_TOKENS + SPECULATE_MAX_BSZ + 2) * 4, 0, 0);
+    }
   }
   if(ret == -1)
 	{
@@ -54,61 +69,20 @@ void GetOutputFunc(const paddle::Tensor& x,
 		return;
 	}
 
-  int bsz = msg_rcv.mtext[1];
 
-  for (int64_t i = 0; i < bsz + 2; i++) {
-    out_data[i] = (int64_t)msg_rcv.mtext[i];
-  }
-  return;
-}
-
-struct SpeculateMsgData {
-    long mtype;
-    int mtext[SPECULATE_MAX_BSZ * MAX_DRAFT_TOKENS + SPECULATE_MAX_BSZ + 2];   // stop_flag, bsz, tokens
-};
-
-
-void SpeculateGetOutputFunc(const paddle::Tensor& x,
-        int64_t rank_id,
-        bool wait_flag) {
-    if (rank_id > 0) {
-        return;
-    }
-    static struct SpeculateMsgData msg_rcv;
-
-    static key_t key = ftok("./", 1);
-
-    static int msgid = msgget(key, IPC_CREAT | 0666);
-
-    int64_t *out_data = const_cast<int64_t*>(x.data<int64_t>());
-    int ret = -1;
-    if (!wait_flag) {
-        ret = msgrcv(msgid, &msg_rcv, (SPECULATE_MAX_BSZ * MAX_DRAFT_TOKENS + SPECULATE_MAX_BSZ + 2) * 4, 0, IPC_NOWAIT);
-    } else {
-        ret = msgrcv(msgid, &msg_rcv, (SPECULATE_MAX_BSZ * MAX_DRAFT_TOKENS + SPECULATE_MAX_BSZ + 2) * 4, 0, 0);
-    }
-    if(ret == -1) {
-        out_data[0] = -2;
-        out_data[1] = 0;
-        return;
-    }
+  if (!speculative_decoding) {
     int bsz = msg_rcv.mtext[1];
-
-    for (int64_t i = 0; i < SPECULATE_MAX_BSZ * MAX_DRAFT_TOKENS + SPECULATE_MAX_BSZ + 2; i++) {
-        out_data[i] = (int64_t)msg_rcv.mtext[i];
+    for (int64_t i = 0; i < bsz + 2; i++) {
+      out_data[i] = (int64_t)msg_rcv.mtext[i];
     }
-    return;
-}
-
-void GetOutput(const paddle::Tensor& x,
-               int64_t rank_id,
-               bool wait_flag,
-               bool speculative_decoding){
-  if (speculative_decoding) {
-      SpeculateGetOutputFunc(x, rank_id, wait_flag);
   } else {
-      GetOutputFunc(x, rank_id, wait_flag);
+    int bsz = specu_msg_rcv.mtext[1];
+    for (int64_t i = 0; i < SPECULATE_MAX_BSZ * MAX_DRAFT_TOKENS + SPECULATE_MAX_BSZ + 2; i++) {
+        out_data[i] = (int64_t)specu_msg_rcv.mtext[i];
+    }
   }
+
+  return;
 }
 
 PD_BUILD_OP(get_output)
