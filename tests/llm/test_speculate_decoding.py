@@ -13,17 +13,11 @@
 # limitations under the License.
 from __future__ import annotations
 
-import os
 import unittest
 
 import paddle
 
-from paddlenlp.transformers import (  # ChatGLMForCausalLM,
-    AutoTokenizer,
-    LlamaForCausalLM,
-)
-
-from .testing_utils import LLMTest, argv_context_guard, load_test_config
+from .testing_utils import LLMTest, argv_context_guard
 
 
 class SpeculatePredictorTest(LLMTest, unittest.TestCase):
@@ -33,12 +27,13 @@ class SpeculatePredictorTest(LLMTest, unittest.TestCase):
         super().setUp()
         paddle.set_default_dtype("bfloat16")
         self.config_params = {
-            "model_name_or_path": self.model_name_or_path, 
-            "mode": "dynamic", 
-            "dtype": "bfloat16", 
+            "model_name_or_path": self.model_name_or_path,
+            "mode": "dynamic",
+            "dtype": "bfloat16",
             "max_length": 48,
-            "inference_model": 1, 
-            "speculate_method": None}
+            "inference_model": 1,
+            "speculate_method": None,
+        }
 
     def run_speculate_predictor(self, speculate_params):
         """
@@ -46,14 +41,13 @@ class SpeculatePredictorTest(LLMTest, unittest.TestCase):
         """
         predict_config = self.config_params
         predict_config.update(speculate_params)
-        
+
         # dynamic forward
         self.disable_static()
         with argv_context_guard(predict_config):
             from predict.predictor import predict
 
             predict()
-
 
         # to static
         self.disable_static()
@@ -85,6 +79,7 @@ class SpeculatePredictorTest(LLMTest, unittest.TestCase):
             "speculate_max_ngram_size": 2,
         }
         self.run_speculate_predictor(speculate_params)
+
 
 if __name__ == "__main__":
     unittest.main()
