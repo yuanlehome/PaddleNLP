@@ -1480,7 +1480,7 @@ def create_predictor(
             cache_kvs_shape = model.get_cache_kvs_shape(
                 config, predictor_args.batch_size, predictor_args.total_max_length
             )
-            if predictor_args.block_attn:
+            if predictor_args.block_attn and predictor_args.speculate_method is None:
                 predictor = StaticBlockInferencePredictor(predictor_args, cache_kvs_shape, tokenizer=tokenizer)
             elif predictor_args.speculate_method is not None:
                 predictor = StaticSpeculateInferencePredictor(predictor_args, cache_kvs_shape, tokenizer=tokenizer)
