@@ -36,11 +36,31 @@ void SaveOutMmsg(const paddle::Tensor& x,
     bool* not_need_stop_data = not_need_stop_cpu.data<bool>();
 
     static struct msgdata msg_sed;
-    static key_t key = ftok("./", 1);
+
+    int msg_queue_id = 1;
+    if (const char* inference_msg_queue_id_env_p = std::getenv("INFERENCE_MSG_QUEUE_ID")){
+        std::string inference_msg_queue_id_env_str(inference_msg_queue_id_env_p);
+        int inference_msg_queue_id_from_env = std::stoi(inference_msg_queue_id_env_str);
+        msg_queue_id = inference_msg_queue_id_from_env;
+    }
+    int inference_msg_id_from_env = 1;
+    if (const char* inference_msg_id_env_p = std::getenv("INFERENCE_MSG_ID")){
+        std::string inference_msg_id_env_str(inference_msg_id_env_p);
+        inference_msg_id_from_env = std::stoi(inference_msg_id_env_str);
+        if (inference_msg_id_from_env == 2){
+            // 2 and -2 is perserve for no-output indication.
+            throw std::runtime_error(" INFERENCE_MSG_ID cannot be 2, please use other number.");
+        }
+        if (inference_msg_id_from_env < 0) {
+            throw std::runtime_error(" INFERENCE_MSG_ID cannot be negative, please use other number.");
+        }
+    }
+    static key_t key = ftok("/dev/shm", msg_queue_id);
+
     static int msgid = msgget(key, IPC_CREAT | 0666);
 
     msg_sed.mtype = 1;
-    msg_sed.mtext[0] = not_need_stop_data[0] ? 1 : -1;
+    msg_sed.mtext[0] = not_need_stop_data[0]  ? inference_msg_id_from_env : -inference_msg_id_from_env;
     int bsz = x.shape()[0];
     msg_sed.mtext[1] = bsz;
     for (int i = 2; i < bsz + 2; i++) {

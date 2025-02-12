@@ -42,7 +42,8 @@ __global__ void update_inputs_kernel_v2(
     const int bsz,
     const int max_bsz,
     const int input_ids_stride,
-    const int end_length) {
+    const int end_length,
+    const bool prefill_one_step_stop) {
   int thread_idx = threadIdx.x;
   // update step_idx and stop_flags
   if (thread_idx < max_bsz) {
@@ -57,15 +58,23 @@ __global__ void update_inputs_kernel_v2(
   __syncthreads();
   // update inputs
   if (thread_idx < bsz) {
-    if (stop_flags[thread_idx]) {
+    if (prefill_one_step_stop) {
+      stop_flags[thread_idx] = true;
       if (seq_lens_this_time[thread_idx] == 0) {
         next_tokens[thread_idx] = -1;
-      } else {
-        next_tokens[thread_idx] = end_ids[0];
-        kwargs_next_tokens[thread_idx] = end_ids[0];
       }
-    } else {
       kwargs_next_tokens[thread_idx] = next_tokens[thread_idx];
+    } else {
+      if (stop_flags[thread_idx]) {
+        if (seq_lens_this_time[thread_idx] == 0) {
+          next_tokens[thread_idx] = -1;
+        } else {
+          next_tokens[thread_idx] = end_ids[0];
+          kwargs_next_tokens[thread_idx] = end_ids[0];
+        }
+      } else {
+        kwargs_next_tokens[thread_idx] = next_tokens[thread_idx];
+      }
     }
     if (is_in_end_v3(next_tokens[thread_idx], end_ids, end_length)) {
       stop_flags[thread_idx] = true;
@@ -125,6 +134,14 @@ void UpdateInputesV2(const paddle::Tensor& stop_flags,
   const int now_bsz = seq_lens_this_time.shape()[0];
   const int input_ids_stride = input_ids.shape()[1];
   const int end_length = end_ids.shape()[0];
+
+  bool prefill_one_step_stop = false;
+  if (const char* env_p = std::getenv("PREFILL_NODE_ONE_STEP_STOP")){
+    if (env_p[0]=='1'){
+      prefill_one_step_stop = true;
+    }
+  }
+
   update_inputs_kernel_v2<1024><<<1, 1024, 0, input_ids.stream()>>>(
     const_cast<bool*>(not_need_stop.data<bool>()),
     const_cast<int64_t*>(step_idx.data<int64_t>()),
@@ -142,7 +159,8 @@ void UpdateInputesV2(const paddle::Tensor& stop_flags,
     now_bsz,
     max_bsz,
     input_ids_stride,
-    end_length
+    end_length,
+    prefill_one_step_stop
   );
 }
 

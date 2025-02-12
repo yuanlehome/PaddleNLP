@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Dict, Any, Optional
 
 from paddlenlp.trainer import TrainingArguments
 from paddlenlp.trainer.trainer_utils import IntervalStrategy
@@ -59,8 +59,8 @@ class SFTConfig(TrainingArguments):
     )
     dataset_num_proc: Optional[int] = None
     dataset_batch_size: int = 1000
-    model_init_kwargs: Optional[dict[str, Any]] = None
-    dataset_kwargs: Optional[dict[str, Any]] = None
+    model_init_kwargs: Optional[Dict[str, Any]] = None
+    dataset_kwargs: Optional[Dict[str, Any]] = None
     eval_packing: Optional[bool] = None
 
     def __post_init__(self):

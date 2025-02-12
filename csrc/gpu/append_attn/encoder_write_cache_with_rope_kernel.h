@@ -14,6 +14,7 @@
 #pragma once
 
 #include "encoder_write_cache_with_rope_impl.cuh"
+#include "remote_cache_kv_ipc.h"
 
 template <typename T, typename QKV_TYPE>
 void EncoderWriteCacheWithRopeKernel(
@@ -36,6 +37,7 @@ void EncoderWriteCacheWithRopeKernel(
     const paddle::optional<paddle::Tensor>& cache_v_scale,
     const paddle::optional<paddle::Tensor>& cache_k_zp,
     const paddle::optional<paddle::Tensor>& cache_v_zp,
+    const paddle::optional<paddle::Tensor>& kv_signal_data,
     const std::string& cache_quant_type_str,
     const int num_blocks,
     const int max_seq_len,
@@ -151,5 +153,14 @@ void EncoderWriteCacheWithRopeKernel(
     PD_THROW(
         "cache_quant_type_str should be one of [none, cache_int8, "
         "cache_int4_zp]");
+  }
+
+  const char* fmt_write_cache_completed_signal_str = std::getenv("FLAGS_fmt_write_cache_completed_signal");
+  if (fmt_write_cache_completed_signal_str && 
+      (std::strcmp(fmt_write_cache_completed_signal_str, "true") == 0 ||
+       std::strcmp(fmt_write_cache_completed_signal_str, "1") == 0)) {
+      if (kv_signal_data) {
+        RemoteCacheKvIpc::save_cache_kv_compelete_signal_layerwise((void*)(const_cast<int64_t*>(kv_signal_data.get().data<int64_t>())));
+      }
   }
 }
