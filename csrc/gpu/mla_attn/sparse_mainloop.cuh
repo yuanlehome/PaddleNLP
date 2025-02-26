@@ -326,7 +326,7 @@ struct SparseCollectiveMainloop {
     static constexpr int CTA_KV = get<1>(TileShape_QKD{});
     const int start_len = tile_idx * mainloop_params.chunk_size;
     const int start_tile_idx = start_len / CTA_KV;
-    const int end_tile_idx = min(start_len + mainloop_params.chunk_size, kv_len) / CTA_KV;
+    const int end_tile_idx = cute::ceil_div(min(start_len + mainloop_params.chunk_size, kv_len), CTA_KV) - 1;
 
     auto kv_block_tables = make_tensor(make_gmem_ptr(mainloop_params.kv_block_tables), make_layout(make_shape(mainloop_params.bsz, mainloop_params.max_block_num_per_seq), make_stride(mainloop_params.max_block_num_per_seq, 1)));
 

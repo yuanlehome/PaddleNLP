@@ -55,7 +55,7 @@ dtype = "bfloat16"
 # prefill
 max_length = 8192
 # bsz = 1
-cache_length = 2048
+# cache_length = 2048
 
 
 def mqa_attention(query, p_compressed_kv, compressed_kv, p_key_pe, key_pe, token_num, softmax_scale):
@@ -129,7 +129,7 @@ def prefill(input_length, compressed_kv, key_pe, latent_cache_shape, block_table
     return latent_cache
 
 
-def test_append_c16_attention(bsz):
+def test_append_c16_attention(cache_length, bsz):
     # prefill
 
     seq_lens_enc = [
@@ -269,7 +269,7 @@ def test_append_c16_attention(bsz):
             0.0,  # out_linear_in_scale
             1,  # speculate_max_draft_token_num
             True,  # causal
-            True,  # use_tensorcore
+            False,  # speculate_decoder
         )
         paddle.device.synchronize()
 
@@ -292,6 +292,8 @@ def test_append_c16_attention(bsz):
 
 
 if __name__ == "__main__":
-    # for bsz in [1, 8, 32, 96, 128, 256]:
-    for bsz in [128]:
-        test_append_c16_attention(bsz)
+    # for cache_length in [1024, 2048]:
+    #   for bsz in [1, 8, 32, 96, 128, 256]:
+    for cache_length in [2048]:
+        for bsz in [128]:
+            test_append_c16_attention(cache_length, bsz)

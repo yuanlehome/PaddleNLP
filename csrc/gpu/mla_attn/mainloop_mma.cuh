@@ -89,7 +89,7 @@ CUTLASS_DEVICE void mma_f16(const Params& mainloop_params,
   // int num_kv_tiles = cute::ceil_div(kv_len, CTA_KV);
   const int start_len = tile_idx * mainloop_params.chunk_size;
   const int start_tile_idx = start_len / CTA_KV;
-  const int end_tile_idx = min(start_len + mainloop_params.chunk_size, kv_len) / CTA_KV;
+  const int end_tile_idx = cute::ceil_div(min(start_len + mainloop_params.chunk_size, kv_len), CTA_KV) - 1;
   int kv_tile_idx = end_tile_idx;
 
   auto consumer_wait = [](auto& pipeline, auto& smem_pipe_read) {
