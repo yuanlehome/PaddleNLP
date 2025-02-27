@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "append_attn/multi_head_latent_attention_kernel.h"
+#include "mla_attn/batch_mla_with_paged_kv_cache.h"
 
 template <paddle::DataType D>
 std::vector<paddle::Tensor> MultiHeadLatentAttentionKernel(
@@ -23,6 +24,7 @@ std::vector<paddle::Tensor> MultiHeadLatentAttentionKernel(
     const paddle::Tensor& seq_lens_encoder,
     const paddle::Tensor& seq_lens_decoder,
     const paddle::Tensor& seq_lens_this_time,
+    const paddle::Tensor& cu_seqlens_q,
     const paddle::Tensor& padding_offsets,
     const paddle::Tensor& cum_offsets,
     const paddle::Tensor& block_tables,
@@ -34,6 +36,7 @@ std::vector<paddle::Tensor> MultiHeadLatentAttentionKernel(
     const paddle::Tensor& kv_num_blocks,
     const paddle::Tensor& decoder_batch_ids,
     const paddle::Tensor& decoder_tile_ids_per_batch,
+    const paddle::Tensor& decoder_num_blocks_device,
     const paddle::Tensor& decoder_num_blocks,
     const paddle::Tensor& max_enc_len_this_time,
     const paddle::Tensor& max_dec_len_this_time,
@@ -61,7 +64,7 @@ std::vector<paddle::Tensor> MultiHeadLatentAttentionKernel(
   typedef PDTraits<D> traits_;
   typedef typename traits_::DataType DataType_;
   typedef typename traits_::data_t data_t;
-
+  
   int encoder_num_blocks_data = encoder_num_blocks.data<int>()[0];
   int kv_num_blocks_data = kv_num_blocks.data<int>()[0];
   int decoder_num_blocks_data = decoder_num_blocks.data<int>()[0];
@@ -70,6 +73,7 @@ std::vector<paddle::Tensor> MultiHeadLatentAttentionKernel(
   int max_len_kv_data = max_len_kv.data<int>()[0];
   const int encoder_block_shape_q = get_encoder_block_shape_q();
   const int decoder_block_shape_q = get_decoder_block_shape_q();
+  const bool mla_use_tensorcore = get_mla_use_tensorcore();
   auto main_stream = query.stream();
 
   paddle::Tensor fmha_out = paddle::full(
@@ -78,26 +82,65 @@ std::vector<paddle::Tensor> MultiHeadLatentAttentionKernel(
       D,
       query.place());
 
+  std::cout << "mla_use_tensorcore:" <<  mla_use_tensorcore << std::endl;
   if (max_dec_len_this_time_data > 0) {
-    DecodeMLAAttentionKernel<data_t>(meta_data,
-                                     query,  // [token_num, num_heads, head_dim]
-                                     key_cache,
-                                     value_cache,
-                                     attn_mask,
-                                     out_linear_shifts,
-                                     out_linear_smooths,
-                                     seq_lens_this_time,  // q_seq_len is 1
-                                     seq_lens_decoder,
-                                     padding_offsets,
-                                     cum_offsets,
-                                     block_tables,
-                                     max_input_length,
-                                     max_len_kv_data,
-                                     softmax_scale,
-                                     out_linear_in_scale,
-                                     causal,
-                                     main_stream,
-                                     &fmha_out);
+    if (mla_use_tensorcore) {
+      BatchMLAWithPagedKVCacheKernel<data_t>(
+        meta_data,
+        query,
+        key_cache,
+        attn_mask,
+        cache_k_dequant_scales,
+        cache_v_dequant_scales,
+        cache_k_zp,
+        cache_v_zp,
+        out_linear_shifts,
+        out_linear_smooths,
+        seq_lens_this_time,
+        seq_lens_decoder,
+        seq_lens_encoder,
+        cu_seqlens_q,
+        padding_offsets,
+        cum_offsets,
+        block_tables,
+        decoder_batch_ids,
+        decoder_tile_ids_per_batch,
+        decoder_num_blocks_device,
+        cache_quant_type_str,
+        decoder_num_blocks_data,
+        decoder_block_shape_q,
+        max_input_length,
+        max_len_kv_data,
+        softmax_scale,
+        quant_max_bound,
+        quant_min_bound,
+        out_linear_in_scale,
+        speculate_max_draft_token_num,
+        causal,
+        main_stream,
+        &fmha_out);
+    } else {
+      DecodeMLAAttentionKernel<data_t>(
+        meta_data,
+        query,  // [token_num, num_heads, head_dim]
+        key_cache,
+        value_cache,
+        attn_mask,
+        out_linear_shifts,
+        out_linear_smooths,
+        seq_lens_this_time,  // q_seq_len is 1
+        seq_lens_decoder,
+        padding_offsets,
+        cum_offsets,
+        block_tables,
+        max_input_length,
+        max_len_kv_data,
+        softmax_scale,
+        out_linear_in_scale,
+        causal,
+        main_stream,
+        &fmha_out);
+    }
   }
   return {fmha_out};
 }
@@ -109,6 +152,7 @@ std::vector<paddle::Tensor> MultiHeadLatentAttention(
     const paddle::Tensor& seq_lens_encoder,
     const paddle::Tensor& seq_lens_decoder,
     const paddle::Tensor& seq_lens_this_time,
+    const paddle::Tensor& cu_seqlens_q,
     const paddle::Tensor& padding_offsets,
     const paddle::Tensor& cum_offsets,
     const paddle::Tensor& block_tables,
@@ -120,6 +164,7 @@ std::vector<paddle::Tensor> MultiHeadLatentAttention(
     const paddle::Tensor& kv_num_blocks,
     const paddle::Tensor& decoder_batch_ids,
     const paddle::Tensor& decoder_tile_ids_per_batch,
+    const paddle::Tensor& decoder_num_blocks_device,
     const paddle::Tensor& decoder_num_blocks,
     const paddle::Tensor& max_enc_len_this_time,
     const paddle::Tensor& max_dec_len_this_time,
@@ -171,6 +216,7 @@ std::vector<paddle::Tensor> MultiHeadLatentAttention(
           seq_lens_encoder,
           seq_lens_decoder,
           seq_lens_this_time,
+          cu_seqlens_q,
           padding_offsets,
           cum_offsets,
           block_tables,
@@ -182,6 +228,54 @@ std::vector<paddle::Tensor> MultiHeadLatentAttention(
           kv_num_blocks,
           decoder_batch_ids,
           decoder_tile_ids_per_batch,
+          decoder_num_blocks_device,
+          decoder_num_blocks,
+          max_enc_len_this_time,
+          max_dec_len_this_time,
+          max_len_kv,
+          attn_mask,
+          query_bias,
+          query_out_scales,
+          cache_k_quant_scales,
+          cache_v_quant_scales,
+          cache_k_dequant_scales,
+          cache_v_dequant_scales,
+          cache_k_zp,
+          cache_v_zp,
+          out_linear_shifts,
+          out_linear_smooths,
+          cache_quant_type_str,
+          max_input_length,
+          softmax_scale,
+          quant_max_bound,
+          quant_min_bound,
+          out_linear_in_scale,
+          speculate_max_draft_token_num,
+          causal,
+          speculate_decoder);
+    }
+    case paddle::DataType::FLOAT16: {
+      return MultiHeadLatentAttentionKernel<paddle::DataType::FLOAT16>(
+          meta_data,
+          query,
+          key_cache,
+          value_cache,
+          seq_lens_encoder,
+          seq_lens_decoder,
+          seq_lens_this_time,
+          cu_seqlens_q,
+          padding_offsets,
+          cum_offsets,
+          block_tables,
+          encoder_batch_ids,
+          encoder_tile_ids_per_batch,
+          encoder_num_blocks,
+          kv_batch_ids,
+          kv_tile_ids_per_batch,
+          kv_num_blocks,
+          decoder_batch_ids,
+          decoder_tile_ids_per_batch,
+          decoder_num_blocks_device,
           decoder_num_blocks,
           max_enc_len_this_time,
           max_dec_len_this_time,
@@ -223,6 +317,7 @@ std::vector<std::vector<int64_t>> MultiHeadLatentAttentionInferShape(
     const std::vector<int64_t>& seq_lens_encoder_shape,
     const std::vector<int64_t>& seq_lens_decoder_shape,
     const std::vector<int64_t>& seq_lens_this_time_shape,
+    const std::vector<int64_t>& cu_seqlens_q_shape,
     const std::vector<int64_t>& padding_offsets_shape,
     const std::vector<int64_t>& cum_offsets_shape,
     const std::vector<int64_t>& block_tables_shape,
@@ -234,6 +329,7 @@ std::vector<std::vector<int64_t>> MultiHeadLatentAttentionInferShape(
     const std::vector<int64_t>& kv_num_blocks_shape,
     const std::vector<int64_t>& decoder_batch_ids_shape,
     const std::vector<int64_t>& decoder_tile_ids_per_batch_shape,
+    const std::vector<int64_t>& decoder_num_blocks_device_shape,
     const std::vector<int64_t>& decoder_num_blocks_shape,
     const std::vector<int64_t>& max_enc_len_this_time_shape,
     const std::vector<int64_t>& max_dec_len_this_time_shape,
@@ -276,6 +372,7 @@ std::vector<paddle::DataType> MultiHeadLatentAttentionInferDtype(
     const paddle::DataType& seq_lens_encoder_dtype,
     const paddle::DataType& seq_lens_decoder_dtype,
     const paddle::DataType& seq_lens_this_time_dtype,
+    const paddle::DataType& cu_seqlens_q_dtype,
     const paddle::DataType& padding_offsets_dtype,
     const paddle::DataType& cum_offsets_dtype,
     const paddle::DataType& block_tables_dtype,
@@ -287,6 +384,7 @@ std::vector<paddle::DataType> MultiHeadLatentAttentionInferDtype(
     const paddle::DataType& kv_num_blocks_dtype,
     const paddle::DataType& decoder_batch_ids_dtype,
     const paddle::DataType& decoder_tile_ids_per_batch_dtype,
+    const paddle::DataType& decoder_num_blocks_device_dtype,
     const paddle::DataType& decoder_num_blocks_dtype,
     const paddle::DataType& max_enc_len_this_time_dtype,
     const paddle::DataType& max_dec_len_this_time_dtype,
@@ -329,6 +427,7 @@ PD_BUILD_OP(multi_head_latent_attention)
              "seq_lens_encoder",
              "seq_lens_decoder",
              "seq_lens_this_time",
+             "cu_seqlens_q",
              "padding_offsets",
              "cum_offsets",
              "block_tables",
@@ -340,6 +439,7 @@ PD_BUILD_OP(multi_head_latent_attention)
              "kv_num_blocks",
              "decoder_batch_ids",
              "decoder_tile_ids_per_batch",
+             "decoder_num_blocks_device",
              "decoder_num_blocks",
              "max_enc_len_this_time",
              "max_dec_len_this_time",
@@ -364,7 +464,7 @@ PD_BUILD_OP(multi_head_latent_attention)
             "quant_max_bound: float",
             "quant_min_bound: float",
             "out_linear_in_scale: float",
-            "speculate_max_draft_token_num: int",
+            "speculate_max_draft_token_num:int",
             "causal: bool",
             "speculate_decoder: bool"})
     .SetKernelFn(PD_KERNEL(MultiHeadLatentAttention))
