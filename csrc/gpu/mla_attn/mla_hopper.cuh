@@ -1,11 +1,26 @@
+// Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
+// 
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+// 
+//     http://www.apache.org/licenses/LICENSE-2.0
+// 
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 /*
  * Copyright (c) 2024, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri
  * Dao. Licensed under the BSD 3-Clause.
  *
  * Modified by the FlashInfer team.
  */
-#ifndef FLASHINFER_ATTENTION_HOPPER_PREFILL_SM90_CUH_
-#define FLASHINFER_ATTENTION_HOPPER_PREFILL_SM90_CUH_
+
+#ifndef ATTENTION_HOPPER_PREFILL_SM90_CUH_
+#define ATTENTION_HOPPER_PREFILL_SM90_CUH_
 
 #include <cuda.h>
 #include <cuda_device_runtime_api.h>
@@ -29,9 +44,12 @@
 #include "sparse_mainloop.cuh"
 #include "utils.cuh"
 
+#ifdef DEBUG_MLA
+#undef DEBUG_MLA
+#endif
 // #define DEBUG_MLA
 
-namespace flashinfer {
+namespace mla_attn {
 
 using namespace cute;
 
@@ -128,24 +146,26 @@ MLAWithKVCacheKernel(CUTE_GRID_CONSTANT
   const int num_blocks_x = mainloop_params.num_blocks_x[0];
 
   static constexpr bool use_tma_load_kv = CollectiveMainloop::USE_TMA_LOAD_KV;
-#ifdef DEBUG_MLA
-  if (thread(0)) {
-    printf("use_tma_load_kv: %d\n", (int)use_tma_load_kv);
-    printf("NUM_MMA_THREADS: %d\b", NUM_MMA_THREADS);
-    printf("NUM_COPY_THREADS: %d\b", NUM_COPY_THREADS);
-  }
-  __syncthreads();
-#endif
+
 
   using MainloopPipeline = typename CollectiveMainloop::MainloopPipeline;
   using PipelineParams = typename MainloopPipeline::Params;
   using PipelineState = typename MainloopPipeline::PipelineState;
+
+  using MainloopPipelineQ = typename CollectiveMainloop::MainloopPipelineQ;
+  using PipelineParamsQ = typename MainloopPipelineQ::Params;
+  using PipelineStateQ = typename MainloopPipelineQ::PipelineState;
 
   extern __shared__ char shared_memory[];
   auto& shared_storage = *reinterpret_cast<typename Ktraits::SharedStorage*>(shared_memory);
 
   int const lane_predicate = cute::elect_one_sync();
   int const warp_idx = cutlass::canonical_warp_idx_sync();
+
+  if (warp_idx == 0 && lane_predicate) {
+    CollectiveMainloop::prefetch_tma_descriptors(mainloop_params);
+    CollectiveEpilogue::prefetch_tma_descriptors(epilogue_params);
+  }
 
   // Obtain warp index
   int const warp_group_thread_idx = threadIdx.x % cutlass::NumThreadsPerWarpGroup;
@@ -154,10 +174,31 @@ MLAWithKVCacheKernel(CUTE_GRID_CONSTANT
   int warp_group_idx = cutlass::canonical_warp_group_idx();
   pipeline_params.role = warp_group_idx == 0 ? MainloopPipeline::ThreadCategory::Producer
                                              : MainloopPipeline::ThreadCategory::Consumer;
-  pipeline_params.producer_arv_count = NUM_COPY_THREADS;
-  pipeline_params.consumer_arv_count = NUM_MMA_THREADS;
-  MainloopPipeline pipeline_q(shared_storage.pipeline_q, pipeline_params);
-  MainloopPipeline pipeline_kv(shared_storage.pipeline_kv, pipeline_params);
+  if constexpr (use_tma_load_kv) {
+    pipeline_params.is_leader = warp_group_thread_idx == 0;
+    pipeline_params.num_consumers = NUM_MMA_THREADS;
+  } else {
+    pipeline_params.producer_arv_count = NUM_COPY_THREADS;
+    pipeline_params.consumer_arv_count = NUM_MMA_THREADS;
+  }
+
+  PipelineParamsQ pipeline_params_q;
+  pipeline_params_q.role = warp_group_idx == 0 ? MainloopPipelineQ::ThreadCategory::Producer
+                                               : MainloopPipelineQ::ThreadCategory::Consumer;
+  pipeline_params_q.producer_arv_count = NUM_COPY_THREADS;
+  pipeline_params_q.consumer_arv_count = cutlass::NumThreadsPerWarpGroup; // just one wg qk
+  
+
+  MainloopPipelineQ pipeline_q(shared_storage.pipeline_q, pipeline_params_q);
+  MainloopPipeline pipeline_kv = [&] {
+    if constexpr (use_tma_load_kv) {
+      pipeline_params.transaction_bytes = CollectiveMainloop::TmaTransactionBytesKV;
+      return MainloopPipeline(shared_storage.pipeline_kv, pipeline_params,
+                              /*cluster_shape=*/Shape<_1, _1, _1>{});
+    } else {
+      return MainloopPipeline(shared_storage.pipeline_kv, pipeline_params);
+    }
+  }();
   __syncthreads();
 
   CollectiveMainloop collective_mainloop;
@@ -165,10 +206,14 @@ MLAWithKVCacheKernel(CUTE_GRID_CONSTANT
   
   if (warp_group_idx == 0) {
     // producer
-    // cutlass::arch::warpgroup_reg_dealloc<80>();
-    cutlass::arch::warpgroup_reg_dealloc<72>();
+    if constexpr (use_tma_load_kv) {
+      cutlass::arch::warpgroup_reg_dealloc<72>();
+    } else {
+      cutlass::arch::warpgroup_reg_dealloc<56>();
+    }
     const uint32_t warp_idx_in_warpgroup = __shfl_sync(0xffffffff, warp_idx % 4, 0);
-    PipelineState smem_pipe_write_q = cutlass::make_producer_start_state<MainloopPipeline>();
+    
+    PipelineStateQ smem_pipe_write_q = cutlass::make_producer_start_state<MainloopPipelineQ>();
     PipelineState smem_pipe_write_kv = cutlass::make_producer_start_state<MainloopPipeline>();
     for (int i = blockIdx.x; i < num_blocks_x; i += SM_COUNT) {
       const int bid = mainloop_params.batch_ids[i];
@@ -177,68 +222,84 @@ MLAWithKVCacheKernel(CUTE_GRID_CONSTANT
       const int seq_len_encoder_now = mainloop_params.seq_lens_encoder[bid];
       const int seq_len_decoder_now = mainloop_params.seq_lens_decoder[bid];
       const int start_token_idx = mainloop_params.cumsum_q_seqlens[bid];
-#ifdef DEBUG_MLA
-      if (block(0) && thread(0)) {
-        printf("i: %d, bid: %d\n", i, bid);
-        printf("bid: %d, tile_id: %d, seq_len_now: %d, seq_len_encoder_now: %d, seq_len_decoder_now: %d, start_token_idx: %d\n"
-              , bid, tile_id, seq_len_now, seq_len_encoder_now, seq_len_decoder_now, start_token_idx);
-      }
-#endif
+
       // load Q
       collective_mainloop.load_q(
           mainloop_params,
           pipeline_q,
           smem_pipe_write_q,
-          shared_storage);
-#ifdef DEBUG_MLA
-      if (block(0) && thread(0)) {
-        printf("load q done\n");
-      }
-#endif
-      
-      // load kv
-      collective_mainloop.load_kv(
-          mainloop_params,
-          pipeline_kv,
-          smem_pipe_write_kv,
           shared_storage,
-          bid,
-          seq_len_decoder_now,
-          tile_id
-      );
-#ifdef DEBUG_MLA
-      if (block(0) && thread(0)) {
-        printf("load kv done\n");
+          threadIdx.x,
+          bid);
+
+      if constexpr (!use_tma_load_kv) {  // Load Q, K, V
+        // load kv
+        collective_mainloop.load_kv(
+            mainloop_params,
+            pipeline_kv,
+            smem_pipe_write_kv,
+            shared_storage,
+            bid,
+            seq_len_decoder_now,
+            tile_id
+        );
+      } else {
+        if (warp_idx_in_warpgroup == 0) {
+          // load kv tma
+          collective_mainloop.load_kv_tma(
+              mainloop_params,
+              pipeline_kv,
+              smem_pipe_write_kv,
+              shared_storage,
+              bid,
+              seq_len_decoder_now,
+              tile_id
+          );
+        }
       }
-#endif
+      cutlass::arch::NamedBarrier::sync(Ktraits::NUM_THREADS,
+                                        /*id=*/static_cast<int>(NamedBarriers::kWG0WG1WG2Sync));
     }
+
     collective_mainloop.load_tail(pipeline_q, smem_pipe_write_q, pipeline_kv, smem_pipe_write_kv);
+    // collective_mainloop.load_tail(pipeline_kv, smem_pipe_write_kv);
+
   } else {
     // consumer
-    // cutlass::arch::warpgroup_reg_alloc<208>(); // 384 threads max_reg_num = 168, 80 * 128 / 256 + 168 = 208
-    cutlass::arch::warpgroup_reg_alloc<216>(); // 384 threads max_reg_num = 168, 80 * 128 / 256 + 168 = 208
-    PipelineState smem_pipe_read_q;
+    if constexpr (use_tma_load_kv) {
+      if (warp_group_idx == 1) {
+        // need 64 168 + 64 = 232
+        cutlass::arch::warpgroup_reg_alloc<224>(); // 384 threads max_reg_num = 168(170), 80 * 128 / 256 + 168 = 208
+        // cutlass::arch::warpgroup_reg_alloc<232>(); // 384 threads max_reg_num = 168(170), 80 * 128 / 256 + 168 = 208
+      } else {
+        // need 40 168 + 40 = 208
+        cutlass::arch::warpgroup_reg_alloc<208>(); // 384 threads max_reg_num = 168(170), 80 * 128 / 256 + 168 = 208
+      }
+    } else {
+      cutlass::arch::warpgroup_reg_alloc<208>(); 
+    }
+    PipelineStateQ smem_pipe_read_q;
     PipelineState smem_pipe_read_kv;
 
-    typename Ktraits::TiledMmaPV tiled_mma_pv;
+    typename Ktraits::TiledMmaPVSS tiled_mma_pv;
     Tensor tOrO = partition_fragment_C(tiled_mma_pv, select<0, 1>(TileShape_PDV{}));
-#ifdef DEBUG_MLA
-    if (thread(128)) {
-        printf("\ntOtO: \n");
-        print(tOrO);
-    }
-#endif
-    clear(tOrO);
 
+    // PipelineStateQ smem_pipe_write_q = cutlass::make_producer_start_state<MainloopPipelineQ>();
     auto attention_updater = OnlineSoftmax<2 * size<1>(tOrO), /*WITH_SCALE=*/true>(mainloop_params.sm_scale);
-    
+
+    int count = 0;
     for (int i = blockIdx.x; i < num_blocks_x; i += SM_COUNT) {
+      // Tensor tOrO = partition_fragment_C(tiled_mma_pv, select<0, 1>(TileShape_PDV{}));
+      clear(tOrO);
+      // auto attention_updater = OnlineSoftmax<2 * size<1>(tOrO), /*WITH_SCALE=*/true>(mainloop_params.sm_scale);
+      clear(attention_updater.scores_scale);
       const int bid = mainloop_params.batch_ids[i];
       const int tile_id = mainloop_params.tile_ids_per_batch[i];
       const int seq_len_now = mainloop_params.seq_lens_this_time[bid];
       const int seq_len_encoder_now = mainloop_params.seq_lens_encoder[bid];
       const int seq_len_decoder_now = mainloop_params.seq_lens_decoder[bid];
       const int start_token_idx = mainloop_params.cumsum_q_seqlens[bid];
+
       mma_f16<Ktraits, CAUSAL>(
           mainloop_params, 
           pipeline_q, 
@@ -246,13 +307,15 @@ MLAWithKVCacheKernel(CUTE_GRID_CONSTANT
           pipeline_kv, 
           smem_pipe_read_kv,
           tOrO, 
-          attention_updater, 
+          attention_updater,
+          count,
           threadIdx.x - NUM_COPY_THREADS,
           bid,
           seq_len_decoder_now,
           seq_len_now,
           tile_id,
           shared_storage);
+
       collective_epilogue.store(
           epilogue_params, 
           tOrO, 
@@ -268,8 +331,14 @@ MLAWithKVCacheKernel(CUTE_GRID_CONSTANT
           seq_len_decoder_now,
           mainloop_params.chunk_size,
           mainloop_params.o_stride_bsz);
+
+      cutlass::arch::NamedBarrier::sync(Ktraits::NUM_THREADS,
+                                        /*id=*/static_cast<int>(NamedBarriers::kWG0WG1WG2Sync));
     }
+
+    // collective_mainloop.load_tail(pipeline_q, smem_pipe_write_q);
     collective_epilogue.store_tail();
+
   }
 }
 
@@ -328,24 +397,20 @@ cudaError_t BatchMLAWithPagedKVCacheKernelTraitsDispatched(Params& params,
       SparseCollectiveMainloop<KernelTraits, CAUSAL>;
   using CollectiveEpilogue = CollectiveEpilogue<KernelTraits>;
 
-  split_q_block<<<1, 32, 0, stream>>>(
-    params.seq_lens_this_time,
-    params.seq_lens_encoder,
-    params.seq_lens_decoder,
-    params.batch_ids,
-    params.tile_ids_per_batch,
-    params.num_blocks_x,
-    params.bsz,
-    KernelTraits::CTA_Q,
-    params.chunk_size,
-    KernelTraits::GROUP_SIZE,
-    false // is_encoder
-  );
-#ifdef DEBUG_MLA
-  printf("chunk_num: :%d\n", params.chunk_num);
-  printf("bsz: :%d\n", params.bsz);
-  printf("q_num_head: :%d\n", params.q_num_head);
-#endif
+  // split_q_block<<<1, 32, 0, stream>>>(
+  //   params.seq_lens_this_time,
+  //   params.seq_lens_encoder,
+  //   params.seq_lens_decoder,
+  //   params.batch_ids,
+  //   params.tile_ids_per_batch,
+  //   params.num_blocks_x,
+  //   params.bsz,
+  //   KernelTraits::CTA_Q,
+  //   params.chunk_size,
+  //   KernelTraits::GROUP_SIZE,
+  //   false // is_encoder
+  // );
+
   typename CollectiveMainloop::Params mainloop_params = CollectiveMainloop::to_underlying_arguments({
       make_layout(make_shape(KernelTraits::CTA_Q, params.qk_head_dim), make_stride(params.qk_head_dim, _1{})), // layout q
       make_layout(make_shape(params.block_size, params.qk_head_dim, params.max_block_num), make_stride(params.qk_head_dim, _1{}, params.block_size * params.qk_head_dim)),
@@ -387,39 +452,28 @@ cudaError_t BatchMLAWithPagedKVCacheKernelTraitsDispatched(Params& params,
   auto kernel =
       (void*)MLAWithKVCacheKernel<CollectiveMainloop, CollectiveEpilogue, KernelTraits, CAUSAL, 132>;
   int smem_size = sizeof(typename KernelTraits::SharedStorage);
-#ifdef DEBUG_MLA
-  printf("smem_size: %d KB\n", smem_size / 1024);
-#endif
-  FLASHINFER_CUDA_CALL(
+  MLA_CUDA_CALL(
       cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
 
   int device;
   cudaGetDevice(&device);
   int multiprocessor_count;
-  FLASHINFER_CUDA_CALL(
+  MLA_CUDA_CALL(
       cudaDeviceGetAttribute(&multiprocessor_count, cudaDevAttrMultiProcessorCount, device));
-#ifdef DEBUG_MLA
-  printf("multiprocessor_count: %d\n", multiprocessor_count);
-#endif
   int act_blocks_per_sm;
   cudaOccupancyMaxActiveBlocksPerMultiprocessor(
       &act_blocks_per_sm, kernel, KernelTraits::NUM_WARPS * 32, smem_size);
-#ifdef DEBUG_MLA
-  printf("act_blocks_per_sm: %d\n", act_blocks_per_sm);
-#endif
   cudaDeviceProp devProp;
   cudaGetDeviceProperties(&devProp, device);
   
   dim3 grid_dims = {multiprocessor_count, 1, 1}; // todo: split kv
   static constexpr int ctaSize = KernelTraits::NUM_WARPS * 32;
-#ifdef DEBUG_MLA
-  printf("ctaSize: %d\n", ctaSize);
-#endif
   dim3 block_dims(ctaSize);
   MLAWithKVCacheKernel<CollectiveMainloop, CollectiveEpilogue, KernelTraits, CAUSAL, 132><<<grid_dims, block_dims, smem_size, stream>>>(
     mainloop_params, epilogue_params
   );
-
+  // cudaDeviceSynchronize();
+  // auto err = cudaGetLastError();
   constexpr int vec_size = 16 / sizeof(DTypeO);
   constexpr int merge_block_size = 256;
   constexpr int blockx = KernelTraits::HEAD_DIM_VO / vec_size;
@@ -444,11 +498,10 @@ cudaError_t BatchMLAWithPagedKVCacheKernelTraitsDispatched(Params& params,
     params.bsz,
     params.max_draft_token_num
   );
-#ifdef DEBUG_MLA
-  cudaDeviceSynchronize();
-  auto err = cudaGetLastError();
-    printf("err = %d, str = %s\n", err, cudaGetErrorString(err));
-#endif
+
+  // cudaDeviceSynchronize();
+  // err = cudaGetLastError();
+  //   printf("err = %d, str = %s\n", err, cudaGetErrorString(err));
   return cudaSuccess;
 }
 
@@ -456,10 +509,6 @@ template <uint32_t HEAD_DIM_QK, uint32_t HEAD_DIM_VO, MaskMode MASK_MODE, typena
 cudaError_t BatchMLAWithPagedKVCacheDispatched(Params& params, cudaStream_t stream) {
   constexpr bool CAUSAL = MASK_MODE == MaskMode::kCausal;
   if constexpr (HEAD_DIM_QK == 576) {
-#ifdef DEBUG_MLA
-    printf("\ngoto HEAD_DIM_QK 576\n");
-#endif
-    // NOTE(Zihao): CTA_KV not tuned for HEAD_DIM == 64, need to optimize later
     DISPATCH_GQA_GROUP_SIZE(params.q_num_head, GROUP_SIZE,
       BatchMLAWithPagedKVCacheKernelTraitsDispatched<
           AttentionKernelTraits</*USE_TMA_LOAD_KV=*/false, HEAD_DIM_QK, HEAD_DIM_VO, GROUP_SIZE,
@@ -476,6 +525,6 @@ cudaError_t BatchMLAWithPagedKVCacheDispatched(Params& params, cudaStream_t stre
   return status;
 };
 
-}  // namespace flashinfer
+}  // namespace mla_attn
 
-#endif  // FLASHINFER_ATTENTION_HOPPER_PREFILL_SM90_CUH_
+#endif  // ATTENTION_HOPPER_PREFILL_SM90_CUH_

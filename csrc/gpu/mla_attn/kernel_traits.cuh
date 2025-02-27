@@ -1,11 +1,26 @@
+// Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
+// 
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+// 
+//     http://www.apache.org/licenses/LICENSE-2.0
+// 
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 /*
  * Copyright (c) 2024, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri
  * Dao. Licensed under the BSD 3-Clause.
  *
  * Modified by the FlashInfer team.
  */
-#ifndef FLASHINFER_ATTENTION_HOPPER_KERNEL_TRAITS_CUH_
-#define FLASHINFER_ATTENTION_HOPPER_KERNEL_TRAITS_CUH_
+
+#ifndef ATTENTION_HOPPER_KERNEL_TRAITS_CUH_
+#define ATTENTION_HOPPER_KERNEL_TRAITS_CUH_
 
 #include <type_traits>
 
@@ -18,11 +33,11 @@
 #include "cutlass/numeric_types.h"
 #include "cutlass/pipeline/pipeline.hpp"
 
-namespace flashinfer {
+namespace mla_attn {
 
 using namespace cute;
 
-template <typename MainloopPipeline, class DTypeQ, class DTypeKV, class DTypeQKAccum, class DTypeOut, class IdType,
+template <typename MainloopPipeline, typename MainloopPipelineQ, class DTypeQ, class DTypeKV, class DTypeQKAccum, class DTypeOut, class IdType,
           int CTA_KV, int NUM_STAGES, class SmemLayoutQ, class SmemLayoutK, class SmemLayoutP, class SmemLayoutRow, class SmemLayoutO>
 struct alignas(16) SharedStorageQKVO {
   alignas(16) cute::array_aligned<DTypeQ, cute::cosize_v<SmemLayoutQ>> smem_q;
@@ -34,8 +49,8 @@ struct alignas(16) SharedStorageQKVO {
   }; // kv_o_smem[NUM_STAGES];
   struct {
     // cutlass::arch::ClusterTransactionBarrier barrier_Q;
-    cutlass::arch::ClusterBarrier barrier_O;
-    alignas(16) typename MainloopPipeline::SharedStorage pipeline_q;
+    // cutlass::arch::ClusterBarrier barrier_O;
+    alignas(16) typename MainloopPipelineQ::SharedStorage pipeline_q;
     alignas(16) typename MainloopPipeline::SharedStorage pipeline_kv;
   };
 };
@@ -67,6 +82,7 @@ struct AttentionKernelTraits {
 
   static constexpr int NUM_WARPS = 12; // 4 + 8
   static constexpr int NUM_THREADS = 384;
+  // static constexpr int NUM_THREADS = 128;
   static constexpr int NUM_PRODUCER_THREADS = 128;
 
   using TileShape_QKD = Shape<Int<CTA_Q>, Int<CTA_KV>, Int<HEAD_DIM_QK>>;
@@ -80,6 +96,10 @@ struct AttentionKernelTraits {
       cute::GMMA::ss_op_selector<DTypeQ, DTypeKV, DTypeQKAccum, TileShape_QKD>(), AtomLayoutQKD{}));
   using TiledMmaPV = decltype(cute::make_tiled_mma(
       cute::GMMA::rs_op_selector<DTypeKV, DTypeKV, /*ElementAccum=*/DTypePVAccum, TileShape_PDV,
+                                 GMMA::Major::K, GMMA::Major::MN>(),
+      AtomLayoutPV{}));
+  using TiledMmaPVSS = decltype(cute::make_tiled_mma(
+      cute::GMMA::ss_op_selector<DTypeKV, DTypeKV, /*ElementAccum=*/DTypePVAccum, TileShape_PDV,
                                  GMMA::Major::K, GMMA::Major::MN>(),
       AtomLayoutPV{}));
 
@@ -127,16 +147,26 @@ struct AttentionKernelTraits {
   using SmemLayoutO = decltype(tile_to_shape(SmemLayoutAtomO{}, select<0, 1>(TileShape_PDV{})));
 
   using SmemCopyAtom = Copy_Atom<cute::SM90_U32x4_STSM_N, DTypeQ>;
+  // permute layout
   using SmemLayoutP = Layout<Shape<Int<CTA_Q>, Int<CTA_KV>>, Stride<Int<CTA_KV>, _1>>;
   using SmemLayoutRow = Layout<Shape<_2, Int<128>>, Stride<_1, _2>>;
 
-  using MainloopPipeline = typename cutlass::PipelineAsync<NUM_STAGES>;
+  using SmemLayoutAtomP = decltype(cutlass::gemm::collective::detail::ss_smem_selector<
+                                   GMMA::Major::K, DTypeQ, decltype(cute::get<0>(TileShape_QKD{})),
+                                   decltype(cute::get<1>(TileShape_QKD{}))>());
+  using SmemLayoutPSS = decltype(tile_to_shape(SmemLayoutAtomP{}, select<0, 1>(TileShape_QKD{})));
+
+  using MainloopPipelineQ = typename cutlass::PipelineAsync<1>;
+  using PipelineStateQ = typename cutlass::PipelineState<1>;
+  using MainloopPipeline =
+      std::conditional_t<USE_TMA_LOAD_KV, typename cutlass::PipelineTmaAsync<NUM_STAGES>,
+                         typename cutlass::PipelineAsync<NUM_STAGES>>;
   using PipelineState = typename cutlass::PipelineState<NUM_STAGES>;
 
-  using SharedStorage = SharedStorageQKVO<MainloopPipeline, DTypeQ, DTypeKV, DTypeQKAccum, DTypeO, IdType, CTA_KV, NUM_STAGES,
+  using SharedStorage = SharedStorageQKVO<MainloopPipeline, MainloopPipelineQ, DTypeQ, DTypeKV, DTypeQKAccum, DTypeO, IdType, CTA_KV, NUM_STAGES,
                                           SmemLayoutQ, SmemLayoutK, SmemLayoutP, SmemLayoutRow, SmemLayoutO>;
 };
 
-}  // namespace flashinfer
+}  // namespace mla_attn
 
-#endif  // FLASHINFER_ATTENTION_HOPPER_KERNEL_TRAITS_CUH_
+#endif

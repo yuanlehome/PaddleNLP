@@ -31,32 +31,37 @@
 
 #include "batch_mla_with_paged_kv_cache.h"
 using namespace cute;
-using namespace flashinfer;
+using namespace mla_attn;
 using namespace std;
+
+inline uint32_t get_max_partition_size(int bsz) {
+    static const char* max_partition_size_env = std::getenv("FLAGS_cascade_attention_max_partition_size");
+    static const uint32_t max_partition_size =
+            max_partition_size_env == nullptr ? 0 : std::stoul(std::string(max_partition_size_env));
+    return (max_partition_size != 0 ? max_partition_size : (bsz == 1 ? 128 : 512));
+}
 
 template <typename T>
 struct cascade_type_traits {
   using type = T;
   using cutlass_type = T;
 };
-
 template <>
 struct cascade_type_traits<phi::dtype::bfloat16> {
   using type = __nv_bfloat16;
   using cutlass_type = cutlass::bfloat16_t;;
 };
-
 template <>
 struct cascade_type_traits<phi::dtype::float16> {
   using type = half;
   using cutlass_type = cutlass::half_t;
 };
-
 template <>
 struct cascade_type_traits<phi::dtype::float8_e4m3fn> {
   using type = __nv_fp8_e4m3;
   using cutlass_type = cutlass::float_e4m3_t;
 };
+
 template <typename T>
 void BatchMLAWithPagedKVCacheKernel(
     const AppendAttnMetaData& meta_data,
@@ -100,24 +105,26 @@ void BatchMLAWithPagedKVCacheKernel(
   const auto q_head_num = meta_data.q_num_heads;
   const auto max_block_num_per_seq = meta_data.max_blocks_per_seq;
   const auto max_block_num = bsz * max_block_num_per_seq;
-  const uint32_t chunk_size = get_kv_chunk_size(bsz);
+  const uint32_t chunk_size = get_max_partition_size(bsz);
+
 
   int q_head_dim = meta_data.head_dims;
   int k_head_dim = meta_data.head_dims;
   int v_head_dim = meta_data.head_dims_v;
-  int num_chunks = max_dec_len / chunk_size;
+  // int num_chunks = max_dec_len / chunk_size;
+  int num_chunks = div_up(max_dec_len, chunk_size);
 
   auto *allocator = paddle::GetAllocator(q.place());
   phi::Allocator::AllocationPtr O_tmp, m_tmp, d_tmp;
   O_tmp = allocator->Allocate(
       phi::SizeOf(q.dtype()) *
-      static_cast<size_t>(num_chunks * bsz * q_head_num * v_head_dim));
+      static_cast<size_t>(num_chunks * bsz * draft_token_num * q_head_num * v_head_dim));
   m_tmp = allocator->Allocate(
       sizeof(float) *
-      static_cast<size_t>(num_chunks * bsz * q_head_num));
+      static_cast<size_t>(num_chunks * bsz * draft_token_num * q_head_num));
   d_tmp = allocator->Allocate(
       sizeof(float) *
-      static_cast<size_t>(num_chunks * bsz * q_head_num));
+      static_cast<size_t>(num_chunks * bsz * draft_token_num * q_head_num));
 
   Params<CUTLASS_TYPE, CUTLASS_TYPE, CUTLASS_TYPE, int> params = {};
   params.Q = reinterpret_cast<CUTLASS_TYPE*>(const_cast<T*>(q.data<T>()));
@@ -154,15 +161,6 @@ void BatchMLAWithPagedKVCacheKernel(
   params.sm_scale = softmax_scale;
   params.chunk_size = chunk_size;
   params.chunk_num = num_chunks;
-#ifdef DEBUG_MLA
-  std::cout << "bsz: " << bsz << std::endl;
-//   std::cout << "kv_seq_len: " << kv_seq_len << std::endl;
-  std::cout << "max_block_num_per_seq: " << max_block_num_per_seq << std::endl;
-  std::cout << "max_block_num: " << max_block_num << std::endl;
-  std::cout << "cache_kv: " << max_block_num * block_size * k_head_dim * 2 / 1024 / 1024 << "MB" << std::endl;
-  std::cout << ", max_num_blocks: " << max_block_num << std::endl;
-  std::cout << "chunk_size: " << chunk_size << std::endl;
-#endif
 
   if (q_head_dim == 576) {
       BatchMLAWithPagedKVCacheDispatched<576, 512, MaskMode::kCausal>(

@@ -1,3 +1,17 @@
+// Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
+// 
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+// 
+//     http://www.apache.org/licenses/LICENSE-2.0
+// 
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 /*
  * Copyright (c) 2024 by FlashInfer team.
  *
@@ -13,8 +27,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#ifndef FLASHINFER_ATTENTION_HOPPER_SPARSE_MAINLOOP_CUH_
-#define FLASHINFER_ATTENTION_HOPPER_SPARSE_MAINLOOP_CUH_
+
+#ifndef ATTENTION_HOPPER_SPARSE_MAINLOOP_CUH_
+#define ATTENTION_HOPPER_SPARSE_MAINLOOP_CUH_
 
 #include <cutlass/array.h>
 #include <cutlass/cutlass.h>
@@ -28,7 +43,12 @@
 #include "named_barrier.cuh"
 #include "utils.cuh"
 
-namespace flashinfer {
+#ifdef DEBUG_MLA
+#undef DEBUG_MLA
+#endif
+// #define DEBUG_MLA
+
+namespace mla_attn {
 
 using namespace cute;
 
@@ -62,6 +82,14 @@ struct SparseCollectiveMainloop {
   using GmemTiledCopy = decltype(make_tiled_copy(
           GmemCopyAtomQ{},
           GmemLayoutAtom{},
+          Layout<Shape<_1, _8>>{}));  // Val layout, 8 vals per read
+
+  using GmemLayoutAtomQ = Layout<
+            Shape<Int<Ktraits::NUM_PRODUCER_THREADS / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>, // 32, 8
+            Stride<Int<kGmemThreadsPerRow>, _1>>;
+  using GmemTiledCopyQ = decltype(make_tiled_copy(
+          GmemCopyAtomQ{},
+          GmemLayoutAtomQ{},
           Layout<Shape<_1, _8>>{}));  // Val layout, 8 vals per read
 
   using SmemLayoutQ = typename Ktraits::SmemLayoutQ;
@@ -103,10 +131,13 @@ struct SparseCollectiveMainloop {
       _1{})); // no mcast for KV
 
   static constexpr bool USE_TMA_LOAD_KV = Ktraits::USE_TMA_LOAD_KV;
-  static constexpr int NUM_MMA_THREADS = size(typename Ktraits::TiledMmaQK{});
   using MainloopPipeline = typename Ktraits::MainloopPipeline;
   using PipelineParams = typename MainloopPipeline::Params;
   using PipelineState = typename MainloopPipeline::PipelineState;
+
+  using MainloopPipelineQ = typename Ktraits::MainloopPipelineQ;
+  using PipelineParamsQ = typename MainloopPipelineQ::Params;
+  using PipelineStateQ = typename MainloopPipelineQ::PipelineState;
 
   static constexpr uint32_t TmaTransactionBytesQ =
       static_cast<uint32_t>(size(SmemLayoutQ{}) * cutlass::sizeof_bits_v<DTypeQ> / 8);
@@ -154,7 +185,6 @@ struct SparseCollectiveMainloop {
     LayoutQT layout_Q;
     LayoutT layout_KV;
     LayoutMDT layout_MD;
-    // TMA_Q tma_load_Q;
     DTypeQ *Q_ptr;
     DTypeKV* KV_ptr;
     DTypeMD* m_ptr;
@@ -180,13 +210,17 @@ struct SparseCollectiveMainloop {
     int chunk_size;
     int chunk_num;
     int max_draft_token_num;
+    TMA_KV tma_load_KV;
   };
 
   static Params to_underlying_arguments(Arguments const& args) {
-#ifdef DEBUG_MLA
-    printf("max_block_num: %d\n", args.max_block_num);
-    printf("max_block_num_per_seq: %d\n", args.max_block_num_per_seq);
-#endif
+    TMA_KV tma_load_KV;
+    if constexpr (USE_TMA_LOAD_KV) {
+      Tensor mKV = make_tensor(make_gmem_ptr(args.KV_ptr), args.layout_KV);
+
+      tma_load_KV = 
+          make_tma_copy(GmemTiledCopyKV{}, mKV, SmemLayoutK{}(_, _, _0{}), select<1, 2>(TileShape_QKD{}), _1{});
+    }
     return {args.layout_Q,
             args.layout_KV,
             args.layout_MD,
@@ -214,13 +248,17 @@ struct SparseCollectiveMainloop {
             args.o_stride_head_num,
             args.chunk_size,
             args.chunk_num,
-            args.max_draft_token_num};
+            args.max_draft_token_num,
+            tma_load_KV
+            };
   }
 
   CUTLASS_DEVICE
   static void prefetch_tma_descriptors(Params const& mainloop_params) {
-    // cute::prefetch_tma_descriptor(mainloop_params.tma_load_Q.get_tma_descriptor());
-    // cute::prefetch_tma_descriptor(mainloop_params.tma_load_KV.get_tma_descriptor());
+    if constexpr (USE_TMA_LOAD_KV) {
+      // cute::prefetch_tma_descriptor(mainloop_params.tma_load_Q.get_tma_descriptor());
+      cute::prefetch_tma_descriptor(mainloop_params.tma_load_KV.get_tma_descriptor());
+    }
   }
 
   CUTLASS_DEVICE
@@ -239,11 +277,11 @@ struct SparseCollectiveMainloop {
 
   template <typename SharedStorage>
   CUTLASS_DEVICE void load_q(Params const& mainloop_params, 
-                             MainloopPipeline pipeline_q,
-                             PipelineState& smem_pipe_write_q,
-                             SharedStorage& shared_storage) {
-    int thread_idx = threadIdx.x;
-    int bid = blockIdx.x;
+                             MainloopPipelineQ pipeline_q,
+                             PipelineStateQ& smem_pipe_write_q,
+                             SharedStorage& shared_storage,
+                             const int thread_idx,
+                             const int bid) {
     int start_q_token_idx = mainloop_params.cumsum_q_seqlens[bid];
     int offset_Q = mainloop_params.q_stride_bsz * start_q_token_idx;
     Tensor mQ = make_tensor(make_gmem_ptr(mainloop_params.Q_ptr + offset_Q), mainloop_params.layout_Q);
@@ -252,55 +290,22 @@ struct SparseCollectiveMainloop {
     Tensor sQ = make_tensor(make_smem_ptr(shared_storage.smem_q.data()), SmemLayoutQ{});
     Tensor cQ = cute::make_identity_tensor(gQ.shape());             // (CPY, (CPY_KV, CPY_D))
 
-    GmemTiledCopy gmem_tiled_copy_q;
+    GmemTiledCopyQ gmem_tiled_copy_q;
     auto gmem_thr_copy_q = gmem_tiled_copy_q.get_slice(thread_idx);
     Tensor tQgQ = gmem_thr_copy_q.partition_S(gQ);  // (CPY, CPY_KV, CPY_D, kv)
     Tensor tQsQ = gmem_thr_copy_q.partition_D(sQ);  // (CPY, CPY_KV, CPY_D, PIPE)
     Tensor tQcQ = gmem_thr_copy_q.partition_D(cQ);  // (CPY, CPY_KV, CPY_D)
     Tensor tQcQGroup = flatten_1(tQcQ);
-#ifdef DEBUG_MLA
-    if (thread(0)) {
-      printf("\nmQ:\n");
-      print(mQ);
-      printf("\ngQ:\n");
-      print(gQ);
-      printf("\nsQ:\n");
-      print(sQ);
-      printf("\ntQgQ:\n");
-      print(tQgQ);
-      printf("\ntQsQ:\n");
-      print(tQsQ);
-      printf("\ncQ:\n");
-      print(cQ);
-      printf("\ntQcQ:\n");
-      print(tQcQ);
-      printf("\ntQcQGroup:\n");
-      print(tQcQGroup);
-    }
-#endif
+
     int valid_q_size = mainloop_params.seq_lens_this_time[bid];
     auto q_predicate_fn = [&](auto coords) {
       auto s_coords = tQcQGroup(_0{}, coords);
-#ifdef DEBUG_MLA
-      if (thread(0)) {
-        printf("\ncoords: \n");
-        print(coords);
-        printf("\ns_coords: \n");
-        print(s_coords);
-      }
-#endif
+
       return elem_less(get<0>(s_coords) / Ktraits::GROUP_SIZE, valid_q_size);
     };
     Tensor tQgQiGroup = flatten_1(tQgQ);
     Tensor tQsQiGroup = flatten_1(tQsQ);
-#ifdef DEBUG_MLA
-    if (thread(0)) {
-      printf("\ntQgQiGroup:\n");
-      print(tQgQiGroup);
-      printf("\ntQsQiGroup:\n");
-      print(tQsQiGroup);
-    }
-#endif
+
     pipeline_q.producer_acquire(smem_pipe_write_q);
     copy_if(gmem_tiled_copy_q, q_predicate_fn, tQgQiGroup, tQsQiGroup);
     pipeline_q.producer_commit(smem_pipe_write_q, cutlass::arch::cpasync_barrier_arrive);
@@ -332,42 +337,86 @@ struct SparseCollectiveMainloop {
 
     Tensor tKgK = gmem_thr_copy_kv.partition_S(gKV);
     Tensor tKsK = gmem_thr_copy_kv.partition_S(sK);
-#ifdef DEBUG_MLA
-    if (blockIdx.x == 0 && threadIdx.x == 0) {
-      printf("\ngKV:\n");
-      print(gKV);
-      printf("\nsK:\n");
-      print(sK);
-      printf("\ntKgK:\n");
-      print(tKgK);
-      printf("\ntKsK:\n");
-      print(tKsK);
-    }
-#endif
+
     // make sure write_O has done
-    cutlass::arch::NamedBarrier::sync(Ktraits::NUM_THREADS,
-                                      /*id=*/static_cast<int>(NamedBarriers::kOdone));
+    // cutlass::arch::NamedBarrier::sync(Ktraits::NUM_THREADS,
+    //                                   /*id=*/static_cast<int>(NamedBarriers::kOdone));
     for (int kv_tile_idx = end_tile_idx; kv_tile_idx >= start_tile_idx; --kv_tile_idx) {
       const int block_idx = kv_block_tables(bid, kv_tile_idx);
+
       pipeline_kv.producer_acquire(smem_pipe_write_kv);
       Tensor tKgKiGroup = flatten_1(tKgK(_, _, _, block_idx));  // (CPY, (CPY_KV, CPY_D))
       Tensor tKsKiGroup =
           flatten_1(tKsK(_, _, _, smem_pipe_write_kv.index()));  // (CPY, (CPY_KV, CPY_D))
       copy(gmem_tiled_copy_kv, tKgKiGroup, tKsKiGroup);
       pipeline_kv.producer_commit(smem_pipe_write_kv, cutlass::arch::cpasync_barrier_arrive);
+
       ++smem_pipe_write_kv;
     }
   }
 
-  CUTLASS_DEVICE void load_tail(MainloopPipeline pipeline_q,
-                                PipelineState& smem_pipe_write_q,
+  template <typename SharedStorage>
+  CUTLASS_DEVICE void load_kv_tma(Params const& mainloop_params, 
+                                  MainloopPipeline pipeline_kv,
+                                  PipelineState& smem_pipe_write_kv,
+                                  SharedStorage& shared_storage,
+                                  const int bid,
+                                  const int kv_len,
+                                  const int tile_idx) {
+    int thread_idx = threadIdx.x;
+    Tensor sK = make_tensor(make_smem_ptr(shared_storage.smem_kv.data()), SmemLayoutK{});
+
+    Tensor mKV = mainloop_params.tma_load_KV.get_tma_tensor(mainloop_params.layout_KV.shape());
+
+    // Prepare the TMA loads
+    Tensor gKV = local_tile(mKV, make_shape(get<1>(TileShape_QKD{}), get<2>(TileShape_QKD{})), make_coord(_, _))(_, _, _0{}, _0{}, _);
+    auto [tKgK, tKsK] = 
+        tma_partition(mainloop_params.tma_load_KV, _0{}, Layout<_1>{},
+                      group_modes<0, 2>(sK), group_modes<0, 2>(gKV));  // (TMA, k), (TMA, PIPE)
+
+    static constexpr int CTA_KV = get<1>(TileShape_QKD{});
+    const int start_len = tile_idx * mainloop_params.chunk_size;
+    const int start_tile_idx = start_len / CTA_KV;
+    const int end_tile_idx = cute::ceil_div(min(start_len + mainloop_params.chunk_size, kv_len), CTA_KV) - 1;
+
+    auto kv_block_tables = make_tensor(make_gmem_ptr(mainloop_params.kv_block_tables), make_layout(make_shape(mainloop_params.bsz, mainloop_params.max_block_num_per_seq), make_stride(mainloop_params.max_block_num_per_seq, 1)));
+
+    int lane_predicate = cute::elect_one_sync();
+    // make sure write_O has done
+    // cutlass::arch::NamedBarrier::sync(Ktraits::NUM_MMA_THREADS + cutlass::NumThreadsPerWarp,
+    //                                   /*id=*/static_cast<int>(NamedBarriers::kOdone));
+
+    if (lane_predicate) {
+#pragma unroll 2
+      for (int kv_tile_idx = end_tile_idx; kv_tile_idx >= start_tile_idx; --kv_tile_idx) {
+        const int block_idx = kv_block_tables(bid, kv_tile_idx);
+        pipeline_kv.producer_acquire(smem_pipe_write_kv);
+        copy(mainloop_params.tma_load_KV.with(*pipeline_kv.producer_get_barrier(smem_pipe_write_kv), /*mcast_mask=*/0),
+             tKgK(_, block_idx), tKsK(_, smem_pipe_write_kv.index()));
+        ++smem_pipe_write_kv;
+      }
+    }
+  }
+
+  CUTLASS_DEVICE void load_tail(MainloopPipelineQ pipeline_q,
+                                PipelineStateQ& smem_pipe_write_q,
                                 MainloopPipeline pipeline_kv,
                                 PipelineState& smem_pipe_write_kv) {
     pipeline_q.producer_tail(smem_pipe_write_q);
     pipeline_kv.producer_tail(smem_pipe_write_kv);
   }
+
+  CUTLASS_DEVICE void load_tail(MainloopPipeline pipeline_kv,
+                                PipelineState& smem_pipe_write_kv) {
+    pipeline_kv.producer_tail(smem_pipe_write_kv);
+  }
+
+  CUTLASS_DEVICE void load_tail(MainloopPipelineQ pipeline_q,
+                                PipelineStateQ& smem_pipe_write_q) {
+    pipeline_q.producer_tail(smem_pipe_write_q);
+  }
 };
 
-}  // namespace flashinfer
+}  // namespace mla_attn
 
-#endif  // FLASHINFER_ATTENTION_HOPPER_SPARSE_MAINLOOP_CUH_
+#endif  // ATTENTION_HOPPER_SPARSE_MAINLOOP_CUH_

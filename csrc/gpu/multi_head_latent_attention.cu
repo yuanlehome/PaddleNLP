@@ -60,7 +60,7 @@ std::vector<paddle::Tensor> MultiHeadLatentAttentionKernel(
     const float out_linear_in_scale,
     const int speculate_max_draft_token_num,
     const bool causal,
-    const bool use_tensor_core) {
+    const bool speculate_decoder) {
   typedef PDTraits<D> traits_;
   typedef typename traits_::DataType DataType_;
   typedef typename traits_::data_t data_t;
@@ -73,6 +73,7 @@ std::vector<paddle::Tensor> MultiHeadLatentAttentionKernel(
   int max_len_kv_data = max_len_kv.data<int>()[0];
   const int encoder_block_shape_q = get_encoder_block_shape_q();
   const int decoder_block_shape_q = get_decoder_block_shape_q();
+  const bool mla_use_tensorcore = get_mla_use_tensorcore();
   auto main_stream = query.stream();
 
   paddle::Tensor fmha_out = paddle::full(
@@ -81,8 +82,9 @@ std::vector<paddle::Tensor> MultiHeadLatentAttentionKernel(
       D,
       query.place());
 
+  std::cout << "mla_use_tensorcore:" <<  mla_use_tensorcore << std::endl;
   if (max_dec_len_this_time_data > 0) {
-    if (use_tensor_core) {
+    if (mla_use_tensorcore) {
       BatchMLAWithPagedKVCacheKernel<data_t>(
         meta_data,
         query,
@@ -188,7 +190,7 @@ std::vector<paddle::Tensor> MultiHeadLatentAttention(
     const float out_linear_in_scale,
     const int speculate_max_draft_token_num,
     const bool causal,
-    const bool use_tensor_core) {
+    const bool speculate_decoder) {
   AppendAttnMetaData meta_data;
 
   const auto& query_dims = query.dims();
@@ -250,7 +252,7 @@ std::vector<paddle::Tensor> MultiHeadLatentAttention(
           out_linear_in_scale,
           speculate_max_draft_token_num,
           causal,
-          use_tensor_core);
+          speculate_decoder);
     }
     case paddle::DataType::FLOAT16: {
       return MultiHeadLatentAttentionKernel<paddle::DataType::FLOAT16>(
@@ -297,7 +299,7 @@ std::vector<paddle::Tensor> MultiHeadLatentAttention(
           out_linear_in_scale,
           speculate_max_draft_token_num,
           causal,
-          use_tensor_core);
+          speculate_decoder);
     }
     default: {
       PD_THROW(
@@ -353,7 +355,7 @@ std::vector<std::vector<int64_t>> MultiHeadLatentAttentionInferShape(
     const float out_linear_in_scale,
     const int speculate_max_draft_token_num,
     const bool causal,
-    const bool use_tensor_core) {
+    const bool speculate_decoder) {
   const int token_num = query_shape[0];
   const int kv_num_heads = key_cache_shape[1];
   const int head_dim_qk = key_cache_shape[3];
@@ -408,7 +410,7 @@ std::vector<paddle::DataType> MultiHeadLatentAttentionInferDtype(
     const float out_linear_in_scale,
     const int speculate_max_draft_token_num,
     const bool causal,
-    const bool use_tensor_core) {
+    const bool speculate_decoder) {
   if (compute_dtype == "bf16") {
     return {paddle::DataType::BFLOAT16};
   } else if (compute_dtype == "fp16") {
@@ -464,7 +466,7 @@ PD_BUILD_OP(multi_head_latent_attention)
             "out_linear_in_scale: float",
             "speculate_max_draft_token_num:int",
             "causal: bool",
-            "use_tensor_core: bool"})
+            "speculate_decoder: bool"})
     .SetKernelFn(PD_KERNEL(MultiHeadLatentAttention))
     .SetInferShapeFn(PD_INFER_SHAPE(MultiHeadLatentAttentionInferShape))
     .SetInferDtypeFn(PD_INFER_DTYPE(MultiHeadLatentAttentionInferDtype));

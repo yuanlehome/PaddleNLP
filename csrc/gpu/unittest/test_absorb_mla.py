@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import math
 import time
 
 import numpy as np
@@ -75,15 +76,44 @@ def mqa_attention(query, p_compressed_kv, compressed_kv, p_key_pe, key_pe, token
     #         if i <= j:
     #             attn_mask[i][j] = -10000
     out = paddle.zeros(shape=[bsz, num_q_head, head_dim_v], dtype=dtype)
+    # print("cache_length: ", cache_length)
+    # print("q: ", q.shape)
+    # print("k: ", k.shape)
+    # print("v: ", v.shape)
     for i in range(num_q_head):
         query = q[:, i, :].reshape([-1, 1, head_dim_qk])
-        # print(query.shape)
+        # print("query: ", query[-1])
+        # score = paddle.bmm(x=query, y=k)  # [bsz, 1, seq_lens]
+        # print("score: ", score[-1])
+        # row_max = paddle.max(score, -1).reshape([-1, 1, 1])
+        # print("row_max: ", row_max[-1])
+        # score = score - row_max
+        # print("score sub max: ", score[-1])
+        # score = score.scale(softmax_scale / math.log(2, math.e))
+        # print("score2: ", score[-1])
+        # # score = paddle.exp(score)
+        # tmp_score = paddle.zeros_like(score)
+        # tmp_score[:] = 2
+        # print("tmp_score: ", tmp_score[-1])
+        # score = paddle.pow(tmp_score, score)
+        # print("score sub max exp: ", score[-1])
+        # d_sum = paddle.sum(score, axis=-1, keepdim=True).reshape([-1, 1, 1])
+        # print("d_sum: ", d_sum[-1])
+        # sub_out = paddle.bmm(score, v)
+        # print("sub_out: ", sub_out[-1])
+        # sub_out /= d_sum
+        # print("norm_res: ", sub_out[-1])
+        # if (i == 6):
+        #     print("res: ", sub_out[27])
+
         query = query.scale(softmax_scale)
-        score = paddle.bmm(x=query, y=k)  # [bsz, 1, seq_lens]
-        # score += attn_mask[:seq_lens_encoder][:seq_lens_encoder]
+        score = paddle.bmm(x=query, y=k)
         score = paddle.nn.functional.softmax(score, axis=-1)
         sub_out = paddle.bmm(score, v).reshape([-1, 1, head_dim_v])
+        # if (i == 6):
+        # print("sub_out2: ", sub_out[27])
         # import pdb; pdb.set_trace()
+
         out[:, i : i + 1, :] = sub_out
 
     out = out.reshape([-1, num_q_head * head_dim_v])
@@ -191,6 +221,7 @@ def test_append_c16_attention(cache_length, bsz):
         1,
     )
     softmax_scale = head_dim_qk ** (-0.5)
+    print("softmax_scale: ", softmax_scale)
 
     # prefill
     p_compressed_kv_shape = [bsz * cache_length, num_kv_head * nope_size]
@@ -198,14 +229,16 @@ def test_append_c16_attention(cache_length, bsz):
     p_compressed_kv = paddle.randn(shape=p_compressed_kv_shape).astype(dtype)
     p_key_pe = paddle.randn(shape=p_key_pe_shape).astype(dtype)
     latent_cache = prefill(cache_length, p_compressed_kv, p_key_pe, latent_cache_shape, block_tables)
-
+    # print("latent_cache-2: ", latent_cache[0])
+    # print("latent_cache-1: ", latent_cache[1])
     # dec
     query = paddle.randn(shape=q_varlen_shape).astype(dtype)
     compressed_kv_shape = [token_num, num_kv_head, nope_size]
     key_pe_shape = [token_num, num_kv_head, pe_size]
     compressed_kv = paddle.rand(shape=compressed_kv_shape).astype(dtype)
     key_pe = paddle.rand(shape=key_pe_shape).astype(dtype)
-
+    # print("compressed_kv: ", compressed_kv)
+    print("key_pe: ", key_pe)
     paddlenlp_ops.decode_mla_write_cache(
         compressed_kv,
         key_pe,
@@ -218,7 +251,61 @@ def test_append_c16_attention(cache_length, bsz):
         "none",
         max_length,
     )
-
+    print("latent_cache0: ", latent_cache.shape)
+    # print("latent_cache_v0: ", latent_cache[132][:, :, :512])
+    # print("latent_cache1: ", latent_cache[1])
+    seq_lens_decoder += 1
+    inputs = [
+        query,
+        seq_lens_encoder,
+        seq_lens_decoder,
+        seq_lens_this_time,
+        cu_seqlens_q,
+        padding_offsets,
+        cum_offsets,
+        block_tables,
+        encoder_batch_ids,
+        encoder_tile_ids_per_batch,
+        encoder_num_blocks,
+        kv_batch_ids,
+        kv_tile_ids_per_batch,
+        kv_num_blocks,
+        decoder_batch_ids,
+        decoder_tile_ids_per_batch,
+        decoder_num_blocks_device,
+        decoder_num_blocks,
+        max_enc_len_this_time,
+        max_dec_len_this_time,
+        max_len_kv,
+    ]
+    inputs_name = [
+        "query",
+        "seq_lens_encoder",
+        "seq_lens_decoder",
+        "seq_lens_this_time",
+        "cu_seqlens_q",
+        "padding_offsets",
+        "cum_offsets",
+        "block_tables",
+        "encoder_batch_ids",
+        "encoder_tile_ids_per_batch",
+        "encoder_num_blocks",
+        "kv_batch_ids",
+        "kv_tile_ids_per_batch",
+        "kv_num_blocks",
+        "decoder_batch_ids",
+        "decoder_tile_idss_per_batch",
+        "decoder_num_blocks_device",
+        "decoder_num_blocks",
+        "max_enc_len_this_time",
+        "max_dec_len_this_time",
+        "max_len_kv",
+    ]
+    for i in range(len(inputs_name)):
+        if "query" == inputs_name[i]:
+            print(f"{inputs_name[i]}: {inputs[i].reshape([-1, num_q_head, head_dim_qk])}")
+        else:
+            print(f"{inputs_name[i]}: {inputs[i]}")
     paddle.device.synchronize()
     s_time = 0
     for i in range(run_time + warm_up):
@@ -263,7 +350,7 @@ def test_append_c16_attention(cache_length, bsz):
             "none",  # cache_quant_type
             head_dim_v,
             max_length,
-            softmax_scale,
+            softmax_scale / math.log(2, math.e),
             0.0,
             0.0,
             0.0,  # out_linear_in_scale
@@ -277,13 +364,11 @@ def test_append_c16_attention(cache_length, bsz):
     base_out = mqa_attention(query, p_compressed_kv, compressed_kv, p_key_pe, key_pe, token_num, softmax_scale)
     base_out = base_out.reshape([-1, num_q_head, head_dim_v])
     out = out.reshape([-1, num_q_head, head_dim_v])
+    print("out: ", out)
+    print("base_out: ", base_out)
     diff = base_out - out
     max_diff = diff.abs().max()
-    # print("base_out:", base_out.shape)
-    # print("out:", out.shape)
-
-    # print("diff:", diff)
-    print("max diff:", max_diff)
+    print(f"max diff: {max_diff}")
     print(
         "dec bsz:{}, num_q_head:{}, cache_length:{}, cost_time:{}ms".format(
             bsz, num_q_head, cache_length, (e_time - s_time) / run_time * 1000
@@ -294,6 +379,6 @@ def test_append_c16_attention(cache_length, bsz):
 if __name__ == "__main__":
     # for cache_length in [1024, 2048]:
     #   for bsz in [1, 8, 32, 96, 128, 256]:
-    for cache_length in [2048]:
-        for bsz in [128]:
+    for cache_length in [108]:
+        for bsz in [1]:
             test_append_c16_attention(cache_length, bsz)

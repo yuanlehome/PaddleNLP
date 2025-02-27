@@ -1,18 +1,33 @@
+// Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
+// 
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+// 
+//     http://www.apache.org/licenses/LICENSE-2.0
+// 
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 /*
  * Copyright (c) 2024, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri
  * Dao. Licensed under the BSD 3-Clause.
  *
  * Modified by the FlashInfer team.
  */
-#ifndef FLASHINFER_ATTENTION_HOPPER_NAMED_BARRIERS_CUH_
-#define FLASHINFER_ATTENTION_HOPPER_NAMED_BARRIERS_CUH_
+
+#ifndef ATTENTION_HOPPER_NAMED_BARRIERS_CUH_
+#define ATTENTION_HOPPER_NAMED_BARRIERS_CUH_
 
 #include <cuda_runtime.h>
 
 #include "cutlass/arch/barrier.h"
 #include "cutlass/cutlass.h"
 
-namespace flashinfer {
+namespace mla_attn {
 
 // Enumerates the reserved named barriers to avoid potential conflicts
 
@@ -24,6 +39,8 @@ enum class NamedBarriers {
   kWarpSchedulerWG3 = 4,
   kPrefetchIndices = 5,
   kOdone = 6,
+  kWG1WG2Sync = 7,
+  kWG0WG1WG2Sync = 8,
 };
 
 __device__ __forceinline__ int get_warp_group_barrier_idx(int warp_group_idx) {
@@ -108,6 +125,6 @@ struct WarpScheduler {
 
 };  // struct WarpScheduler
 
-}  // namespace flashinfer
+}  // namespace mla_attn
 
-#endif  // FLASHINFER_ATTENTION_HOPPER_NAMED_BARRIERS_CUH_
+#endif  // ATTENTION_HOPPER_NAMED_BARRIERS_CUH_

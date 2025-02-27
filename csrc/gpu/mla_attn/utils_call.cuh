@@ -1,3 +1,17 @@
+// Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
+// 
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+// 
+//     http://www.apache.org/licenses/LICENSE-2.0
+// 
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 /*
  * Copyright (c) 2023 by FlashInfer team.
  *
@@ -13,8 +27,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#ifndef FLASHINFER_UTILS_CUH_
-#define FLASHINFER_UTILS_CUH_
+
+#ifndef UTILS_CUH_
+#define UTILS_CUH_
 #include <cuda_bf16.h>
 #include <cuda_device_runtime_api.h>
 #include <cuda_fp16.h>
@@ -32,12 +47,12 @@
 #define STR(x) STR_HELPER(x)
 
 // macro to turn off fp16 qk reduction to reduce binary
-#ifndef FLASHINFER_ALWAYS_DISUSE_FP16_QK_REDUCTION
-#define FLASHINFER_ALWAYS_DISUSE_FP16_QK_REDUCTION 0
+#ifndef ALWAYS_DISUSE_FP16_QK_REDUCTION
+#define ALWAYS_DISUSE_FP16_QK_REDUCTION 0
 #endif
 
 #ifndef NDEBUG
-#define FLASHINFER_CUDA_CALL(func, ...)                                                     \
+#define MLA_CUDA_CALL(func, ...)                                                     \
   {                                                                                         \
     cudaError_t e = (func);                                                                 \
     if (e != cudaSuccess) {                                                                 \
@@ -47,7 +62,7 @@
     }                                                                                       \
   }
 #else
-#define FLASHINFER_CUDA_CALL(func, ...) \
+#define MLA_CUDA_CALL(func, ...) \
   {                                     \
     cudaError_t e = (func);             \
     if (e != cudaSuccess) {             \
@@ -58,7 +73,7 @@
 
 #define DISPATCH_USE_FP16_QK_REDUCTION(use_fp16_qk_reduction, USE_FP16_QK_REDUCTION, ...) \
   if (use_fp16_qk_reduction) {                                                            \
-    FLASHINFER_ERROR("FP16_QK_REDUCTION disabled at compile time");                       \
+    MLA_ATTN_ERROR("FP16_QK_REDUCTION disabled at compile time");                       \
   } else {                                                                                \
     constexpr bool USE_FP16_QK_REDUCTION = false;                                         \
     __VA_ARGS__                                                                           \
@@ -74,7 +89,7 @@
   } else {                                             \
     std::ostringstream err_msg;                        \
     err_msg << "Unsupported num_mma_q: " << num_mma_q; \
-    FLASHINFER_ERROR(err_msg.str());                   \
+    MLA_ATTN_ERROR(err_msg.str());                   \
   }
 
 #define DISPATCH_NUM_MMA_KV(max_mma_kv, NUM_MMA_KV, ...) \
@@ -93,7 +108,7 @@
   } else {                                               \
     std::ostringstream err_msg;                          \
     err_msg << "Unsupported max_mma_kv: " << max_mma_kv; \
-    FLASHINFER_ERROR(err_msg.str());                     \
+    MLA_ATTN_ERROR(err_msg.str());                     \
   }
 
 #define DISPATCH_CTA_TILE_Q(cta_tile_q, CTA_TILE_Q, ...)   \
@@ -116,7 +131,7 @@
     default: {                                             \
       std::ostringstream err_msg;                          \
       err_msg << "Unsupported cta_tile_q: " << cta_tile_q; \
-      FLASHINFER_ERROR(err_msg.str());                     \
+      MLA_ATTN_ERROR(err_msg.str());                     \
     }                                                      \
   }
 
@@ -139,7 +154,7 @@
   } else {                                                   \
     std::ostringstream err_msg;                              \
     err_msg << "Unsupported group_size: " << group_size;     \
-    FLASHINFER_ERROR(err_msg.str());                         \
+    MLA_ATTN_ERROR(err_msg.str());                         \
   }
 
 #define DISPATCH_MASK_MODE(mask_mode, MASK_MODE, ...)         \
@@ -162,7 +177,7 @@
     default: {                                                \
       std::ostringstream err_msg;                             \
       err_msg << "Unsupported mask_mode: " << int(mask_mode); \
-      FLASHINFER_ERROR(err_msg.str());                        \
+      MLA_ATTN_ERROR(err_msg.str());                        \
     }                                                         \
   }
 
@@ -192,7 +207,7 @@
     default: {                                         \
       std::ostringstream err_msg;                      \
       err_msg << "Unsupported head_dim: " << head_dim; \
-      FLASHINFER_ERROR(err_msg.str());                 \
+      MLA_ATTN_ERROR(err_msg.str());                 \
     }                                                  \
   }
 
@@ -216,7 +231,7 @@
     default: {                                                                   \
       std::ostringstream err_msg;                                                \
       err_msg << "Unsupported pos_encoding_mode: " << int(pos_encoding_mode);    \
-      FLASHINFER_ERROR(err_msg.str());                                           \
+      MLA_ATTN_ERROR(err_msg.str());                                           \
     }                                                                            \
   }
 
@@ -250,7 +265,7 @@
     default: {                                                             \
       std::ostringstream err_msg;                                          \
       err_msg << "Unsupported aligned_vec_size: " << aligned_vec_size;     \
-      FLASHINFER_ERROR(err_msg.str());                                     \
+      MLA_ATTN_ERROR(err_msg.str());                                     \
     }                                                                      \
   }
 
@@ -263,7 +278,7 @@
     __VA_ARGS__                                                                             \
   }
 
-namespace flashinfer {
+namespace mla_attn {
 
 template <typename T1, typename T2>
 __forceinline__ __device__ __host__ T1 ceil_div(const T1 x, const T2 y) {
@@ -305,7 +320,6 @@ inline uint32_t FA2DetermineCtaTileQ(int64_t avg_packed_qo_len, uint32_t head_di
         return 16;
       }
     } else {
-      // NOTE(Zihao): not enough shared memory on Turing for 1x4 warp layout
       return 64;
     }
   }
@@ -350,6 +364,6 @@ __device__ __forceinline__ uint32_t dim4_offset(const uint32_t& dim_c, const uin
   template <typename T>                                                                        \
   inline constexpr bool has_##member##_v = has_##member<T>::value;
 
-}  // namespace flashinfer
+}  // namespace mla_attn
 
-#endif  // FLASHINFER_UTILS_CUH_
+#endif  // UTILS_CUH_

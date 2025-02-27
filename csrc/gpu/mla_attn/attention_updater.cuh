@@ -1,18 +1,30 @@
+// Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
+// 
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+// 
+//     http://www.apache.org/licenses/LICENSE-2.0
+// 
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 /*
  * Copyright (c) 2024, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri
  * Dao. Licensed under the BSD 3-Clause.
  *
  * Modified by the FlashInfer team.
  */
-#ifndef FLASHINFER_ATTENTION_HOPPER_ATTENTION_UPDATER_CUH_
-#define FLASHINFER_ATTENTION_HOPPER_ATTENTION_UPDATER_CUH_
 
 #include <cute/tensor.hpp>
 #include <cutlass/detail/helper_macros.hpp>
 
 #include "utils.cuh"
 
-namespace flashinfer {
+namespace mla_attn {
 
 using namespace cute;
 
@@ -149,17 +161,14 @@ struct DefaultUpdater {
 
   template <bool init, typename Tensor0>
   __forceinline__ __device__ void update(Tensor0& acc_s) {
-    // NOTE(Zihao): nothing to do here
   };
 
   template <typename Tensor1>
   __forceinline__ __device__ void finalize(Tensor1& acc_s) {
-    // NOTE(Zihao): nothing to do here
   };
 
   template <typename Tensor1>
   __forceinline__ __device__ void rescale_o(Tensor1& acc_o) {
-    // NOTE(Zihao): nothing to do here
   };
 };
 
@@ -219,7 +228,7 @@ struct OnlineSoftmax {
   };
 
   template <typename Tensor0>
-  __forceinline__ __device__ void finalize(Tensor0& acc_s) {
+  __forceinline__ __device__ TensorT finalize(Tensor0& acc_s) {
     // Reshape acc_s from ((2, 2, V), MMA_M, MMA_N) to (nrow=(2, MMA_M), ncol=(2, V, MMA_N))
     Tensor scores = make_tensor(acc_s.data(), convert_layout_acc_rowcol(acc_s.layout()));
     static_assert(decltype(size<0>(scores))::value == NUM_ROWS_PER_THREAD);
@@ -231,11 +240,12 @@ struct OnlineSoftmax {
       float inv_sum = 1.f / sum;
       scores_scale(mi) = inv_sum;
       if constexpr (WITH_SCALE) {
-        row_sum(mi) = row_max(mi) * sm_scale_log2 + math::ptx_log2(sum);
+        row_sum(mi) = row_max(mi) * sm_scale_log2 + math::ptx_log2(sum); // m + logsum(exp(x - m)) = logsum((exp(x - m)exp(m)))
       } else {
         row_sum(mi) = row_max(mi) + math::ptx_log2(sum);
       }
     }
+    return scores_scale;
   };
 
   template <typename Tensor1>
@@ -254,7 +264,7 @@ struct OnlineSoftmax {
   };
 
   template <typename Tensor1, typename Tensor2>
-  __forceinline__ __device__ void rescale_o(Tensor1& acc_o, Tensor2 scores_scale_input) {
+  __forceinline__ __device__ void rescale_o(Tensor1& acc_o, Tensor2& scores_scale_input) {
     // Reshape acc_o from (MMA=4, MMA_M, MMA_K) to (nrow=(2, MMA_M), ncol=(2, MMA_K))
     Tensor acc_o_rowcol = make_tensor(acc_o.data(), convert_layout_acc_rowcol(acc_o.layout()));
     static_assert(decltype(size<0>(acc_o_rowcol))::value == NUM_ROWS_PER_THREAD);
@@ -269,6 +279,5 @@ struct OnlineSoftmax {
   };
 };
 
-}  // namespace flashinfer
+}  // namespace mla_attn
 
-#endif  // FLASHINFER_ATTENTION_HOPPER_ATTENTION_UPDATER_CUH_

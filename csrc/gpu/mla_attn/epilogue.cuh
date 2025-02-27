@@ -1,11 +1,27 @@
+// Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
+// 
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+// 
+//     http://www.apache.org/licenses/LICENSE-2.0
+// 
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 /*
  * Copyright (c) 2024, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri
  * Dao. Licensed under the BSD 3-Clause.
  *
  * Modified by the FlashInfer team.
  */
-#ifndef FLASHINFER_ATTENTION_HOPPER_EPILOGUE_CUH_
-#define FLASHINFER_ATTENTION_HOPPER_EPILOGUE_CUH_
+
+
+#ifndef ATTENTION_HOPPER_EPILOGUE_CUH_
+#define ATTENTION_HOPPER_EPILOGUE_CUH_
 
 #include <cutlass/cutlass.h>
 
@@ -15,7 +31,12 @@
 #include "named_barrier.cuh"
 #include "utils.cuh"
 
-namespace flashinfer {
+#ifdef DEBUG_MLA
+#undef DEBUG_MLA
+#endif
+// #define DEBUG_MLA
+
+namespace mla_attn {
 
 
 using namespace cute;
@@ -82,24 +103,6 @@ struct CollectiveEpilogue {
       decltype(make_tiled_copy(TiledCopyOAtom{}, TiledCopyOThrLayout{},  // Thr layout
                                TiledCopyOValLayout{}                     // Val layout
                                ));
-
-  // Host side kernel arguments
-  // struct Arguments {
-  //   DTypeO* O_ptr;
-  //   LayoutT const layout_O;
-  //   // float* lse_ptr;
-  //   // LayoutLseT const layout_LSE;
-  // };
-
-  // // Device side kernel params
-  // struct Params {
-  //   DTypeO* O_ptr;
-  //   LayoutT const layout_O;
-  //   // float* lse_ptr;
-  //   // LayoutLseT const layout_LSE;
-  //   TMA_O tma_store_O;
-  // };
-
   struct Arguments {
     DTypeO* O_ptr;
     LayoutNTMAT const layout_O;
@@ -119,32 +122,7 @@ struct CollectiveEpilogue {
     // LayoutLseT const layout_LSE;
   };
 
-  // static Params to_underlying_arguments(Arguments const& args) {
-  //   Tensor mO = make_tensor(make_gmem_ptr(args.O_ptr), args.layout_O);
-  //   printf("\nmO:\n");
-  //   print(mO);
-  //   printf("\nSmemLayoutO:\n");
-  //   print(SmemLayoutO{});
-  //   TMA_O tma_store_O = make_tma_copy(
-  //       GmemTiledCopyOTMA{},
-  //       mO,
-  //       SmemLayoutO{},
-  //       select<0, 1>(TileShape_PDV{}),
-  //       _1{}); // no mcast for O
-  //   // return {args.O_ptr, args.layout_O, args.lse_ptr, args.layout_LSE};
-  //   return {args.O_ptr, args.layout_O, tma_store_O};
-  // }
-
-  /// Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
-  // CUTLASS_DEVICE
-  // static void prefetch_tma_descriptors(Params const& epilogue_params) {
-  //   prefetch_tma_descriptor(epilogue_params.tma_store_O.get_tma_descriptor());
-  // }
-
   static Params to_underlying_arguments_ntma(Arguments const& args) {
-#ifdef DEBUG_MLA
-    printf("to_underlying_arguments_ntma\n");
-#endif
     return {args.O_ptr, args.layout_O, args.O_ptr_tmp, args.layout_O_tmp};
   }
 
@@ -226,7 +204,7 @@ struct CollectiveEpilogue {
     // cutlass::arch::fence_view_async_shared();  // ensure smem writes are visible to TMA
     // cutlass::arch::NamedBarrier::arrive(NUM_MMA_THREADS + Ktraits::NUM_PRODUCER_THREADS,
     //                                     cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
-    
+
     TiledCopyO gmem_tiled_copy_O;
     auto O_ptr = num_chunks == 1 ? epilogue_params.O_ptr + start_token_idx * o_stride_bsz : epilogue_params.O_ptr_tmp + (tile_idx * bsz + bid) * o_stride_bsz;
     Tensor mO = make_tensor(make_gmem_ptr(O_ptr), epilogue_params.layout_O);
@@ -239,47 +217,10 @@ struct CollectiveEpilogue {
     Tensor tOgOGroup = flatten_1(tOgO);        // (CPY, (CPY_O, CPY_D))
     Tensor tOsOGroup = flatten_1(tOsO);        // (CPY, (CPY_O, CPY_D))
     Tensor tOcOGroup = flatten_1(tOcO);        // (CPY, (CPY_O, CPY_D))
-#ifdef DEBUG_MLA
-    if (thread(128)) {
-      printf("\nmO: \n");
-      print(mO);
-      printf("\ngO: \n");
-      print(gO);
-      printf("\ncO: \n");
-      print(cO);
-      printf("\nsO: \n");
-      print(sO);
-      printf("\ntOgO: \n");
-      print(tOgO);
-      printf("\ntOsO: \n");
-      print(tOsO);
-      printf("\ntOcO: \n");
-      print(tOcO);
-      printf("\ntOgOGroup: \n");
-      print(tOgOGroup);
-      printf("\ntOsOGroup: \n");
-      print(tOsOGroup);
-      printf("\ntOcOGroup: \n");
-      print(tOcOGroup);
-    }
-#endif
+
     // copy if not out of bound
     auto predicate_fn = [&](auto coords) {
       auto s_coords = tOcOGroup(_0{}, coords);
-#ifdef DEBUG_MLA
-      if (thread(128)) {
-        printf("\ncoords: \n");
-        print(coords);
-        printf("\ns_coords: \n");
-        print(s_coords);
-        printf("\nget<0>(s_coords): \n");
-        print(get<0>(s_coords));
-        printf("\nget<0>(s_coords) / Ktraits::GROUP_SIZE: \n");
-        print(get<0>(s_coords) / Ktraits::GROUP_SIZE);
-        printf("\nseq_len_now: \n");
-        print(seq_len_now);
-      }
-#endif
       return elem_less(get<0>(s_coords) / Ktraits::GROUP_SIZE, seq_len_now);
     };
     copy_if(gmem_tiled_copy_O, predicate_fn, tOsOGroup, tOgOGroup);
@@ -290,6 +231,6 @@ struct CollectiveEpilogue {
   }
 };
 
-}  // namespace flashinfer
+}  // namespace mla_attn
 
-#endif  // FLASHINFER_ATTENTION_HOPPER_EPILOGUE_CUH_
+#endif  // ATTENTION_HOPPER_EPILOGUE_CUH_
