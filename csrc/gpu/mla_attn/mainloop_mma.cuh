@@ -120,7 +120,7 @@ CUTLASS_DEVICE void mma_f16(const Params& mainloop_params,
 #pragma unroll
         for (int i = 0; i < size(tSrS); ++i) {
           int qo_idx = get<0>(tScS(i)) / Ktraits::GROUP_SIZE;
-          int kv_idx = get<1>(tScS(i)) + start_len + kv_tile_idx * BLOCK_SHAPE_KV;
+          int kv_idx = get<1>(tScS(i)) + kv_tile_idx * BLOCK_SHAPE_KV;
           if constexpr (!CAUSAL) {  // Just masking based on col
             if (kv_idx >= kv_len) {
               tSrS(i) = AttentionUpdater::fill_value;
@@ -326,7 +326,7 @@ CUTLASS_DEVICE void mma_f16_two_stages(const Params& mainloop_params,
 #pragma unroll
       for (int i = 0; i < size(tSrS); ++i) {
         int qo_idx = get<0>(tScS(i)) / Ktraits::GROUP_SIZE;
-        int kv_idx = get<1>(tScS(i)) + start_len + kv_tile_idx * BLOCK_SHAPE_KV;
+        int kv_idx = get<1>(tScS(i)) + kv_tile_idx * BLOCK_SHAPE_KV;
         if constexpr (!CAUSAL) {  // Just masking based on col
           if (kv_idx >= kv_len) {
             tSrS(i) = AttentionUpdater::fill_value;
@@ -384,7 +384,7 @@ CUTLASS_DEVICE void mma_f16_two_stages(const Params& mainloop_params,
 #pragma unroll
         for (int i = 0; i < size(tSrS); ++i) {
           int qo_idx = get<0>(tScS(i)) / Ktraits::GROUP_SIZE;
-          int kv_idx = get<1>(tScS(i)) + start_len + kv_tile_idx * BLOCK_SHAPE_KV;
+          int kv_idx = get<1>(tScS(i)) + kv_tile_idx * BLOCK_SHAPE_KV;
           if constexpr (!CAUSAL) {  // Just masking based on col
             if (kv_idx >= kv_len) {
               tSrS(i) = AttentionUpdater::fill_value;
